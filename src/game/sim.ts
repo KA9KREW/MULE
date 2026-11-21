@@ -132,6 +132,11 @@ import { doctrineStanceOf, foeBrainStats, notifyAiMatchEnd, notifyAiMatchStart, 
 import { bestSelfPlayStyle, type AiStyle } from "./selfPlayBook";
 import { doctrineProfileForLanes, doctrineTune as savedDoctrineTune, type DoctrineTune } from "./doctrineTune";
 import type { ResourceBias } from "./doctrineAdapt";
+import {
+  computeSquadFormation,
+  computeWaveMarchTarget,
+  separateFriendlyUnits,
+} from "./formation";
 import { saveHumanLog, type HumanBuildStep, type MatchTimelinePoint } from "./matchLog";
 import {
   awardMatchXp,
@@ -493,7 +498,7 @@ export class GameSim {
     }
   }
 
-  private assignDefendRallies(team: Team, layer: DefendLayerId) {
+  private assignDefendRallies(team: Team, layer: DefendLayerId, preserveEngaged = false) {
     const seed = this.activeMap.seed;
     const lanes = mapLanes(seed);
     const troops = this.state.units
@@ -512,10 +517,18 @@ export class GameSim {
       team,
     );
     const trebBand = riverLayers(seed).find((b) => b.id === trebBelt);
-    for (const u of this.state.units) {
-      if (u.team !== team || u.kind !== "trebuchet" || this.isPlayerDriven(u) || u.hp <= 0) continue;
+    const trebs = this.state.units
+      .filter((u) => u.team === team && u.kind === "trebuchet" && !this.isPlayerDriven(u) && u.hp > 0)
+      .sort((a, b) => a.id - b.id);
+    const trebLaneIdx = new Map<Lane, number>();
+    for (const u of trebs) {
+      const idx = trebLaneIdx.get(u.lane) ?? 0;
+      trebLaneIdx.set(u.lane, idx + 1);
+      const latOffset = idx === 0 ? 0 : idx % 2 === 1 ? -14 : 14;
       if (layer === "keep") {
-        u.rallyPoint = defendPointFor(seed, "keep", u.lane, u.id, team);
+        const pt = defendPointFor(seed, "keep", u.lane, u.id, team);
+        const fwd = team === "you" ? -1 : 1;
+        u.rallyPoint = { x: pt.x + latOffset, y: pt.y - 14 * fwd };
         u.aiHeldForRush = false;
         u.aiStagingPoint = undefined;
         continue;
@@ -548,11 +561,11 @@ export class GameSim {
         if (parked == null) parked = y;
       }
       if (parked != null) y = parked;
-      u.rallyPoint = { x: lanePathX(seed, team, u.lane, y), y };
+      u.rallyPoint = { x: lanePathX(seed, team, u.lane, y) + latOffset, y };
       u.aiHeldForRush = false;
       u.aiStagingPoint = undefined;
     }
-    // Attack: clear hold rallies so barracks troops resume normal lane march / fight AI.
+    // Attack: clear hold rallies so barracks troops resume cohesive wave march / fight AI.
     if (layer === "assault") {
       for (const u of troops) {
         u.rallyPoint = undefined;
@@ -565,64 +578,110 @@ export class GameSim {
     }
     // Spread barracks troops across roads so Commands don't pile everyone on one lane.
     this.balanceTroopLanes(troops, lanes);
+
+    // Group troops by formation anchor so every bridge/keep/escort pocket fans out
+    // into a layered formation: Levies front, Siege core surrounded by Wards/Runners, Archers back.
+    const groups = new Map<string, { anchor: Vec2; squad: Unit[]; hasNearbySiege: boolean; tightBridge: boolean }>();
+    const addToGroup = (
+      key: string,
+      anchor: Vec2,
+      u: Unit,
+      hasNearbySiege = false,
+      tightBridge = false,
+    ) => {
+      let g = groups.get(key);
+      if (!g) {
+        g = { anchor, squad: [], hasNearbySiege, tightBridge };
+        groups.set(key, g);
+      }
+      if (hasNearbySiege) g.hasNearbySiege = true;
+      g.squad.push(u);
+    };
+
     if (layer === "keep") {
       for (const u of troops) {
-        u.rallyPoint = defendPointFor(seed, layer, u.lane, u.id, team);
-        u.engageFrom = undefined;
+        if (u.kind === "spy") {
+          u.rallyPoint = undefined;
+          continue;
+        }
+        const anchor = defendPointFor(seed, layer, u.lane, 0, team);
+        const laneHasTreb = trebs.some((e) => e.lane === u.lane);
+        addToGroup(`keep:${u.lane}`, anchor, u, laneHasTreb, false);
+      }
+    } else {
+      const belt = absoluteRiverLayer(
+        layer === "home" || layer === "mid" || layer === "forward" ? layer : "mid",
+        team,
+      );
+      const band = riverLayers(seed).find((b) => b.id === belt);
+      const bridges = band
+        ? lanes.map((lane) => bridgeCrossing(seed, lane, band))
+        : [defendPointFor(seed, layer, 0, 0, team)];
+      const load = bridges.map(() => 0);
+      const fwd = team === "you" ? -1 : 1;
+
+      for (const u of troops) {
+        let slot = Math.min(Math.max(0, lanes.indexOf(u.lane)), bridges.length - 1);
+        if (load[slot]! >= BRIDGE_STATION_CAP) {
+          let best = -1;
+          let bestLoad = Infinity;
+          for (let i = 0; i < bridges.length; i++) {
+            if (load[i]! >= BRIDGE_STATION_CAP) continue;
+            if (load[i]! < bestLoad) {
+              bestLoad = load[i]!;
+              best = i;
+            }
+          }
+          slot = best >= 0 ? best : load.indexOf(Math.min(...load));
+        }
+        if (this.cpuStyle[team] === "doctrine" && (u.kind === "rammer" || u.kind === "spy")) {
+          u.rallyPoint = undefined;
+          if (!preserveEngaged) u.engageFrom = undefined;
+          u.aiHeldForRush = false;
+          continue;
+        }
+        // Doctrine escorts form a cohesive protective formation around their lane Trebuchet.
+        if (
+          this.cpuStyle[team] === "doctrine" &&
+          (u.kind === "levy" || u.kind === "ward" || u.kind === "archer" || u.kind === "runner" || u.kind === "templar")
+        ) {
+          const treb = trebs.find((e) => e.lane === u.lane) ?? trebs[0];
+          if (treb) {
+            const gap = Math.round(this.doctrineTune[team].escortGap * 0.5);
+            const anchorY = treb.pos.y + gap * fwd;
+            const anchor = { x: lanePathX(seed, team, treb.lane, anchorY), y: anchorY };
+            addToGroup(`treb:${treb.id}`, anchor, u, true, false);
+            continue;
+          }
+        }
+        if (load[slot]! >= BRIDGE_STATION_CAP) {
+          const anchor = defendPointFor(seed, "keep", u.lane, 0, team);
+          addToGroup(`keep:${u.lane}`, anchor, u, false, false);
+        } else {
+          load[slot]! += 1;
+          const lane = lanes[Math.min(slot, lanes.length - 1)] ?? u.lane;
+          u.lane = lane;
+          // Anchor slightly on our side of the bridgehead so the formation fans out cleanly.
+          const bPt = bridges[slot]!;
+          const anchor = { x: bPt.x, y: bPt.y - 10 * fwd };
+          const laneHasTreb = trebs.some((e) => e.lane === lane);
+          addToGroup(`bridge:${slot}`, anchor, u, laneHasTreb, true);
+        }
+      }
+    }
+
+    for (const group of groups.values()) {
+      const slots = computeSquadFormation(group.anchor, team, group.squad, {
+        hasNearbySiege: group.hasNearbySiege,
+        tightBridge: group.tightBridge,
+      });
+      for (const u of group.squad) {
+        const pt = slots.get(u.id);
+        if (pt) u.rallyPoint = pt;
+        if (!preserveEngaged) u.engageFrom = undefined;
         u.aiHeldForRush = false;
         u.aiStagingPoint = undefined;
       }
-      return;
-    }
-    const belt = absoluteRiverLayer(
-      layer === "home" || layer === "mid" || layer === "forward" ? layer : "mid",
-      team,
-    );
-    const band = riverLayers(seed).find((b) => b.id === belt);
-    const bridges = band
-      ? lanes.map((lane) => bridgeCrossing(seed, lane, band))
-      : [defendPointFor(seed, layer, 0, 0, team)];
-    const load = bridges.map(() => 0);
-    for (const u of troops) {
-      let slot = Math.min(Math.max(0, lanes.indexOf(u.lane)), bridges.length - 1);
-      if (load[slot]! >= BRIDGE_STATION_CAP) {
-        let best = -1;
-        let bestLoad = Infinity;
-        for (let i = 0; i < bridges.length; i++) {
-          if (load[i]! >= BRIDGE_STATION_CAP) continue;
-          if (load[i]! < bestLoad) {
-            bestLoad = load[i]!;
-            best = i;
-          }
-        }
-        slot = best >= 0 ? best : load.indexOf(Math.min(...load));
-      }
-      if (load[slot]! >= BRIDGE_STATION_CAP) {
-        u.rallyPoint = defendPointFor(seed, "keep", u.lane, u.id, team);
-      } else {
-        load[slot]! += 1;
-        const lane = lanes[Math.min(slot, lanes.length - 1)] ?? u.lane;
-        u.lane = lane;
-        u.rallyPoint = { ...bridges[slot]! };
-      }
-      if (this.cpuStyle[team] === "doctrine" && (u.kind === "rammer" || u.kind === "spy")) {
-        u.rallyPoint = undefined;
-        u.engageFrom = undefined;
-        u.aiHeldForRush = false;
-        continue;
-      }
-      if (this.cpuStyle[team] === "doctrine" && (u.kind === "levy" || u.kind === "ward" || u.kind === "archer")) {
-        const engines = this.state.units.filter((e) => e.team === team && e.kind === "trebuchet" && e.hp > 0);
-        const treb = engines.find((e) => e.lane === u.lane) ?? engines[0];
-        if (treb) {
-          const gap = this.doctrineTune[team].escortGap;
-          const ahead = team === "foe" ? treb.pos.y + gap : treb.pos.y - gap;
-          u.rallyPoint = { x: lanePathX(seed, team, u.lane, ahead), y: ahead };
-        }
-      }
-      u.engageFrom = undefined;
-      u.aiHeldForRush = false;
-      u.aiStagingPoint = undefined;
     }
   }
 
@@ -2311,6 +2370,25 @@ export class GameSim {
       siegeTimer: 0,
     };
     this.state.units.push(u);
+    if (fromBarracks && holdLayer && holdLayer !== "assault") {
+      // Slot newly spawned troops smoothly into the team's active holding formation.
+      this.assignDefendRallies(team, holdLayer, true);
+    } else if (fromBarracks && !holdLayer && barracks?.rallyPoint && u.rallyPoint) {
+      // Spread custom barracks rally points into a tactical formation instead of 1 pixel.
+      const rallied = this.state.units.filter(
+        (x) =>
+          x.team === team &&
+          x.hp > 0 &&
+          x.fromBarracks &&
+          x.rallyPoint &&
+          dist(x.rallyPoint, barracks.rallyPoint!) <= 46,
+      );
+      const slots = computeSquadFormation(barracks.rallyPoint, team, rallied);
+      for (const member of rallied) {
+        const pt = slots.get(member.id);
+        if (pt) member.rallyPoint = pt;
+      }
+    }
   }
 
   /**
@@ -3919,19 +3997,24 @@ export class GameSim {
           }
           continue;
         }
+        const holdingLayer =
+          this.state.defendLayer[u.team] != null && this.state.defendLayer[u.team] !== "assault";
         if (u.rallyPoint) {
-          moveTowards(u.pos, u.rallyPoint, u.speed, dt);
-          const onPad =
-            this.cpuStyle[u.team] === "doctrine" &&
-            this.getPads(this.enemyOf(u.team)).some(
-              (p) => p.zone === "combat" && dist(p.pos, u.rallyPoint!) < 8,
-            );
-          if (dist(u.pos, u.rallyPoint) < 5 && !onPad) u.rallyPoint = undefined;
+          if (dist(u.pos, u.rallyPoint) > 3.5) {
+            moveTowards(u.pos, u.rallyPoint, u.speed, dt);
+          } else {
+            const onPad =
+              this.cpuStyle[u.team] === "doctrine" &&
+              this.getPads(this.enemyOf(u.team)).some(
+                (p) => p.zone === "combat" && dist(p.pos, u.rallyPoint!) < 8,
+              );
+            if (!onPad && !holdingLayer) u.rallyPoint = undefined;
+          }
           continue;
         }
         const hold = this.defendDest(u);
-        if (hold && dist(u.pos, hold) > 6) {
-          moveTowards(u.pos, hold, u.speed, dt);
+        if (hold) {
+          if (dist(u.pos, hold) > 5) moveTowards(u.pos, hold, u.speed, dt);
           continue;
         }
       }
@@ -4049,14 +4132,23 @@ export class GameSim {
         continue;
       }
       const dir = team === "you" ? -1 : 1;
-      u.pos.y += dir * u.speed * dt;
-      // Follow the actual curved road instead of marching down a fixed vertical line.
-      const roadX = lanePathX(this.activeMap.seed, team, u.lane, u.pos.y);
-      const lateralPull = u.kind === "rammer" ? 1.2 : 0.9;
-      const lateralStep = Math.min(Math.abs(roadX - u.pos.x), u.speed * lateralPull * dt);
-      u.pos.x += Math.sign(roadX - u.pos.x) * lateralStep;
+      if (u.fromBarracks) {
+        const wave = computeWaveMarchTarget(this.activeMap.seed, u, this.state.units);
+        u.pos.y += dir * u.speed * wave.speedMult * dt;
+        const lateralPull = u.kind === "rammer" ? 1.2 : 0.95;
+        const lateralStep = Math.min(Math.abs(wave.targetX - u.pos.x), u.speed * lateralPull * dt);
+        u.pos.x += Math.sign(wave.targetX - u.pos.x) * lateralStep;
+      } else {
+        u.pos.y += dir * u.speed * dt;
+        // Follow the actual curved road instead of marching down a fixed vertical line.
+        const roadX = lanePathX(this.activeMap.seed, team, u.lane, u.pos.y);
+        const lateralPull = u.kind === "rammer" ? 1.2 : 0.9;
+        const lateralStep = Math.min(Math.abs(roadX - u.pos.x), u.speed * lateralPull * dt);
+        u.pos.x += Math.sign(roadX - u.pos.x) * lateralStep;
+      }
       if (u.kind === "rammer") this.pinSiegeToRoad(u, team, dt);
     }
+    separateFriendlyUnits(this.state.units, dt, this.state.possessedId);
   }
 
   private cleanupDeaths() {
