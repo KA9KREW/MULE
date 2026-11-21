@@ -224,7 +224,7 @@ export class GameRenderer {
   /** Battlefield width in sim units. 3-road maps are wider than the default 400. */
   private mapWidth = WORLD_W;
   private readonly camDistMin = 80;
-  private readonly camDistMax = 900;
+  private readonly camDistMax = 1500;
   private readonly camPitchMin = 0.72;
   private readonly camPitchMax = 1.35;
   private camShake = new THREE.Vector3();
