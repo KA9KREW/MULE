@@ -130,7 +130,8 @@ import {
 } from "./arena";
 import { doctrineStanceOf, foeBrainStats, notifyAiMatchEnd, notifyAiMatchStart, runAiTurn } from "./ai";
 import { bestSelfPlayStyle, type AiStyle } from "./selfPlayBook";
-import { doctrineTune as savedDoctrineTune, type DoctrineTune } from "./doctrineTune";
+import { doctrineProfileForLanes, doctrineTune as savedDoctrineTune, type DoctrineTune } from "./doctrineTune";
+import type { ResourceBias } from "./doctrineAdapt";
 import { saveHumanLog, type HumanBuildStep, type MatchTimelinePoint } from "./matchLog";
 import {
   awardMatchXp,
@@ -218,6 +219,7 @@ export class GameSim {
     you: { ...savedDoctrineTune },
     foe: { ...savedDoctrineTune },
   };
+  private customDoctrineTune: Record<Team, boolean> = { you: false, foe: false };
   private humanLog: {
     active: boolean;
     nextSampleAt: number;
@@ -440,7 +442,8 @@ export class GameSim {
     if (layer) {
       const opts = defendLayerOptions(this.activeMap.seed);
       if (!opts.some((o) => o.id === layer)) {
-        if (layer === "home" && opts.some((o) => o.id === "keep")) layer = "keep";
+        if (layer === "mid" && opts.some((o) => o.id === "home")) layer = "home";
+        else if ((layer === "home" || layer === "mid") && opts.some((o) => o.id === "keep")) layer = "keep";
         else return;
       }
     }
@@ -670,13 +673,21 @@ export class GameSim {
     this.bothCpu = on;
   }
 
+  isBothCpu() {
+    return this.bothCpu;
+  }
+
   setCpuStyle(team: Team, style: AiStyle) {
     this.cpuStyle[team] = style;
   }
 
   setDoctrineTune(tune: Partial<DoctrineTune>, team?: Team) {
     const apply = (side: Team) => {
-      this.doctrineTune[side] = { ...this.doctrineTune[side], ...tune };
+      const base = this.customDoctrineTune[side]
+        ? this.doctrineTune[side]
+        : doctrineProfileForLanes(this.activeMap.lanes);
+      this.doctrineTune[side] = { ...base, ...tune };
+      this.customDoctrineTune[side] = true;
     };
     if (team) apply(team);
     else {
@@ -686,7 +697,9 @@ export class GameSim {
   }
 
   getDoctrineTune(team: Team = "foe") {
-    return this.doctrineTune[team];
+    return this.customDoctrineTune[team]
+      ? this.doctrineTune[team]
+      : doctrineProfileForLanes(this.activeMap.lanes);
   }
 
   getMatchMode() {
@@ -4858,7 +4871,7 @@ export class GameSim {
         scoutSalt: meta.scoutSalt,
       },
       aiStyle: this.cpuStyle.foe,
-      doctrineTune: { ...this.doctrineTune.foe },
+      doctrineTune: { ...this.getDoctrineTune("foe") },
       outcome: {
         humanWon: won,
         durationSec: Math.round(s.time),
@@ -5058,6 +5071,8 @@ export class GameSim {
       Math.min(...pad.laneCoverage.map((lane) => laneDefense[lane] ?? 0)) - (pad.laneCoverage.length > 1 ? 0.25 : 0);
     const blocked = (pad: Pad) =>
       this.state.units.some((u) => u.team !== team && u.hp > 0 && dist(u.pos, pad.pos) < 34);
+    // Symmetric forwardness: higher = closer to midfield for BOTH teams.
+    const forwardness = (pad: Pad) => (team === "foe" ? pad.pos.y : WORLD_H - pad.pos.y);
     const target = pads
       .filter((p) => !occ.has(p.id) && !blocked(p) && (zone ? p.zone === zone : kind === "house" ? houseZones.has(p.zone) : p.zone === "combat"))
       .sort((a, b) => {
@@ -5065,9 +5080,14 @@ export class GameSim {
           // Prefer purple midfield houses for army pop, then yard eco.
           const az = a.zone === "midEco" ? 0 : 1;
           const bz = b.zone === "midEco" ? 0 : 1;
-          return az - bz || a.pos.y - b.pos.y;
+          return az - bz || forwardness(a) - forwardness(b);
         }
-        return padNeed(a) - padNeed(b) || a.pos.y - b.pos.y;
+        if (kind === "barracks") {
+          // Tuck barracks on the safest backline combat pads (leaving forward chokes for towers).
+          return forwardness(a) - forwardness(b) || a.laneCoverage.length - b.laneCoverage.length;
+        }
+        // Towers: cover the weakest road first, prefer multi-lane chokes, then push forward.
+        return padNeed(a) - padNeed(b) || forwardness(b) - forwardness(a);
       })[0];
     if (!target) return false;
     this.spendRes(team, cost);
@@ -5275,7 +5295,7 @@ export class GameSim {
     return this.aiUpgradeDefense("adaptive");
   }
 
-  aiAssignWorkers(team: Team = "foe") {
+  aiAssignWorkers(team: Team = "foe", resourceBias: ResourceBias = "balanced") {
     const nodes = this.state.nodes.filter((n) => n.team === team && n.loadsLeft > 0);
     const peons = this.state.villagers.filter((v) => v.team === team);
 
@@ -5312,14 +5332,26 @@ export class GameSim {
     }
 
     if (this.cpuStyle[team] === "doctrine") {
-      // Doctrine shifts one peon when siege timber or gold is heavily lopsided.
+      // Doctrine shifts workers toward the resource bottlenecking its active EcoGoal.
       const wood = this.state.wood[team];
       const gold = this.state.gold[team];
-      const wantKind = wood < 170 && gold > 240 ? "pine" : gold < 120 && wood > 260 ? "copper" : null;
+      const wantKind =
+        wood > 280 && gold < 220
+          ? "copper"
+          : resourceBias === "wood"
+            ? "pine"
+            : resourceBias === "gold"
+              ? "copper"
+              : wood < 170 && gold > 240
+                ? "pine"
+                : gold < 120 && wood > 260
+                  ? "copper"
+                  : null;
       if (wantKind) {
         const hasOpen = nodes.some((n) => n.kind === wantKind && n.workers < n.maxWorkers);
         const onWant = peons.filter((v) => nodes.find((n) => n.id === v.targetNodeId)?.kind === wantKind).length;
-        if (hasOpen && onWant < Math.ceil(peons.length * 0.65)) {
+        const maxShare = resourceBias === "balanced" ? 0.65 : 0.72;
+        if (hasOpen && onWant < Math.ceil(peons.length * maxShare)) {
           const donor = peons.find((v) => {
             const node = nodes.find((n) => n.id === v.targetNodeId);
             return node && node.kind !== wantKind && (v.state === "toNode" || v.state === "gathering");
@@ -5336,8 +5368,8 @@ export class GameSim {
 
     let idle = peons.filter((v) => v.state === "idle" || v.state === "home").length;
     while (idle > 0) {
-      const lowWood = this.state.wood[team] < 100;
-      const lowGold = this.state.gold[team] < 100;
+      const lowWood = this.state.wood[team] < 100 || resourceBias === "wood";
+      const lowGold = this.state.gold[team] < 100 || resourceBias === "gold";
       const target = nodes
         .filter((n) => n.workers < n.maxWorkers)
         .sort((a, b) => {

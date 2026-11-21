@@ -1,7 +1,8 @@
-import { isWardKind } from "./balance";
+import { BUILD_COST, CHURCH_UPGRADE_GOLD, UPGRADE_COST, isWardKind } from "./balance";
 import type { DoctrineTune } from "./doctrineTune";
+import type { OpponentTendency } from "./opponentProfile";
 import type { GameSim } from "./sim";
-import type { Team, TrainKind } from "./types";
+import type { DefendLayerId, Team, TrainKind } from "./types";
 
 export type AdaptiveStance =
   | "standard"
@@ -11,7 +12,19 @@ export type AdaptiveStance =
   | "anti-ballista"
   | "anti-ward"
   | "anti-swarm"
-  | "anti-siege";
+  | "anti-siege"
+  | "regroup";
+
+export type EcoGoal =
+  | "none"
+  | "guard-dogs"
+  | "church"
+  | "trebuchet"
+  | "catapult"
+  | "ballista"
+  | "barracks-upgrade";
+
+export type ResourceBias = "wood" | "gold" | "balanced";
 
 export interface EnemyIntel {
   watchtowers: number;
@@ -46,9 +59,38 @@ export interface AdaptivePlan {
   wardPct: number;
   archerPct: number;
   runnerPct: number;
+  earlyScreenGoal: number;
   pushFloor: number;
   requireTrebs: number;
   upgradePref: "damage" | "rate" | "adaptive";
+  desiredLayer: DefendLayerId;
+  ecoGoal: EcoGoal;
+  reserveGold: number;
+  reserveWood: number;
+  resourceBias: ResourceBias;
+}
+
+interface AssaultMemory {
+  wasAssaulting: boolean;
+  hadSiegeOnPush: boolean;
+  retreatUntil: number;
+}
+
+const assaultMemory: Record<Team, AssaultMemory> = {
+  you: { wasAssaulting: false, hadSiegeOnPush: false, retreatUntil: 0 },
+  foe: { wasAssaulting: false, hadSiegeOnPush: false, retreatUntil: 0 },
+};
+
+/** Clear per-match tactical memory on match start/reset. */
+export function resetDoctrineMemory(team?: Team) {
+  const clear = (side: Team) => {
+    assaultMemory[side] = { wasAssaulting: false, hadSiegeOnPush: false, retreatUntil: 0 };
+  };
+  if (team) clear(team);
+  else {
+    clear("you");
+    clear("foe");
+  }
 }
 
 /**
@@ -95,38 +137,66 @@ export function scoutEnemy(sim: GameSim, team: Team): EnemyIntel {
 }
 
 /**
- * On-the-fly counter planner grounded in Roadkeep's combat math:
- * - Wards counter archers/watchtowers; Levies (+25%) & Ballistas counter Wards.
- * - Catapults splash clumps & hit Trebs (1.65x); Spies & Runners (1.55x) hunt Trebs.
- * - Trebuchets (190 range) & Spies dismantle Ballista (178 range) fortresses.
- * - Ballista Rate Rank 1+ posts guard dogs that instakill Spies.
+ * On-the-fly counter planner grounded in Roadkeep's combat math + fair cross-match
+ * opponent tendencies + goal-based economy reservation + mid-map staging & retreat.
  */
 export function adaptDoctrinePlan(
+  team: Team,
   tune: DoctrineTune,
   intel: EnemyIntel,
   own: {
     time: number;
+    gold: number;
+    wood: number;
     ecoFull: boolean;
+    hasForwardHouse: boolean;
     churches: number;
+    ballistas: number;
+    catapults: number;
+    needsGuardDogUpgrade: boolean;
+    barracksBelowMax: boolean;
     armyUsed: number;
     armyCap: number;
     trebs: number;
+    rams: number;
     keepHpRatio: number;
+    enemyKeepHpRatio: number;
+    currentLayer: DefendLayerId | null;
   },
+  profile?: OpponentTendency | null,
 ): AdaptivePlan {
   let stance: AdaptiveStance = "standard";
   let wardPct = tune.wardPct;
   let archerPct = tune.archerPct;
   let runnerPct = 0;
+  let earlyScreenGoal = tune.earlyScreen;
+
+  // Fair historical tendency prep (only active with >= 2 completed games; live intel always overrides).
+  const hasProfile = Boolean(profile && profile.sampleSize >= 2);
+  if (hasProfile && profile) {
+    if (profile.earlyRushRate >= 0.55) {
+      earlyScreenGoal = Math.max(earlyScreenGoal, tune.earlyScreen + 2);
+    }
+    if (profile.wardRate >= 0.55 && intel.totalArmy < 4) {
+      archerPct = Math.min(archerPct, 10);
+    } else if (profile.archerRate >= 0.55 && intel.totalArmy < 4) {
+      wardPct = Math.max(wardPct, 42);
+    }
+  }
 
   const lateDefense = own.ecoFull && (own.churches >= 1 || own.time >= 200 || intel.totalArmy >= 10);
   let wantBallistas = lateDefense ? Math.max(tune.ballistaGoal, 2) : tune.ballistaGoal;
   let wantCatapults = lateDefense ? 1 : 0;
 
-  const fortified = intel.defenseTowers >= 3 || (own.time >= 210 && intel.defenseTowers >= 2);
+  const profileFortressHint = Boolean(hasProfile && profile && profile.fortressRate >= 0.65 && own.time >= 130);
+  const fortified =
+    intel.defenseTowers >= 3 ||
+    (own.time >= 210 && intel.defenseTowers >= 2) ||
+    (profileFortressHint && intel.defenseTowers >= 2);
+  const trebCap = Math.max(2, Math.min(3, tune.siegeTrebCap));
   let wantTrebs = own.ecoFull
     ? fortified
-      ? Math.max(tune.trebGoal, intel.defenseTowers >= 4 ? 3 : 2)
+      ? Math.max(tune.trebGoal, intel.defenseTowers >= 4 ? trebCap : 2)
       : intel.defenseTowers >= 2
         ? Math.min(tune.trebGoal, 2)
         : 0
@@ -136,7 +206,10 @@ export function adaptDoctrinePlan(
     own.ecoFull && (intel.trebs > 0 || intel.defenseTowers >= 3)
       ? Math.max(tune.spyGoal, intel.trebs > 0 ? 2 : 1)
       : 0;
-  let needGuardDogs = intel.spies > 0 || (own.time >= 240 && intel.barracks >= 1);
+  const needGuardDogs =
+    intel.spies > 0 ||
+    (own.time >= 230 && intel.barracks >= 1) ||
+    Boolean(hasProfile && profile && profile.siegeRate >= 0.6 && own.time >= 170);
   let upgradePref: "damage" | "rate" | "adaptive" = "adaptive";
 
   // 1. Emergency anti-rush: enemy crosses early before our eco finishes.
@@ -155,22 +228,22 @@ export function adaptDoctrinePlan(
       wantSpies = own.ecoFull ? Math.max(wantSpies, Math.min(3, intel.trebs + 1)) : wantSpies;
       // Fast runners (54 spd, 1.55x melee vs trebs) rush enemy trebs down.
       runnerPct = 25;
-      archerPct = Math.min(archerPct, 10); // Archers deal only 0.28x to trebs!
+      archerPct = Math.min(archerPct, 10); // Archers deal only 0.28x to trebs.
       wantCatapults = Math.max(wantCatapults, 1);
     }
     if (intel.rams >= 3) {
       wantBallistas = Math.max(wantBallistas, 2);
-      archerPct = Math.min(archerPct, 10); // Archers deal only 0.38x to rams!
+      archerPct = Math.min(archerPct, 10); // Archers deal only 0.38x to rams.
       upgradePref = "damage";
     }
   }
 
-  // 3. Counter enemy Fortress / Ballista Wall (Issues #9 & #10 pattern).
+  // 3. Counter enemy Fortress / Ballista Wall.
   if (intel.defenseTowers >= 3) {
     if (stance === "standard") stance = intel.ballistas >= 2 ? "anti-ballista" : "anti-fortress";
     wantBallistas = Math.max(wantBallistas, 2);
     wantCatapults = Math.max(wantCatapults, 1);
-    wantTrebs = own.ecoFull ? Math.max(wantTrebs, intel.defenseTowers >= 4 ? 3 : 2) : 0;
+    wantTrebs = own.ecoFull ? Math.max(wantTrebs, intel.defenseTowers >= 4 ? trebCap : 2) : 0;
     wantSpies = own.ecoFull ? Math.max(wantSpies, 2) : 0;
     if (intel.ballistas >= 2) {
       // Ballistas pierce Ward armor; lean into cheaper Levies + Rams behind Trebuchets.
@@ -178,7 +251,7 @@ export function adaptDoctrinePlan(
       archerPct = Math.min(archerPct, 20);
       wantRams = own.ecoFull ? Math.max(wantRams, 5) : 0;
     } else {
-      // Watchtower/Catapult wall without Ballistas: Wards (0.88 resist) walk right through!
+      // Watchtower/Catapult wall without Ballistas: Wards (0.88 resist) walk right through.
       wardPct = Math.max(wardPct, 45);
     }
   }
@@ -186,14 +259,12 @@ export function adaptDoctrinePlan(
   // 4. Counter enemy Unit Composition dynamically.
   if (intel.wards >= 4 && intel.wards >= intel.levies) {
     if (stance === "standard") stance = "anti-ward";
-    // Archers only deal 0.40x to Wards; Levies deal 1.25x bonus vs Wards!
-    archerPct = 0;
+    archerPct = 0; // Archers only deal 0.40x to Wards; Levies deal 1.25x bonus vs Wards.
     wardPct = Math.min(wardPct, 20);
     wantBallistas = Math.max(wantBallistas, 2);
     upgradePref = "damage";
   } else if (intel.archers >= 5) {
     if (stance === "standard") stance = "anti-swarm";
-    // Wards take 0.40x from Archers; Catapults splash clumped Archers.
     wardPct = Math.max(wardPct, 45);
     archerPct = Math.min(archerPct, 15);
     wantCatapults = Math.max(wantCatapults, 1);
@@ -223,20 +294,124 @@ export function adaptDoctrinePlan(
   const bankForTreb =
     own.ecoFull &&
     fortified &&
-    own.trebs < Math.min(wantTrebs, 3) &&
+    own.trebs < Math.min(wantTrebs, trebCap) &&
     own.armyUsed >= 8;
 
   let pushFloor = tune.attackAt;
   let requireTrebs = 0;
   if (greedyEnemy) {
-    pushFloor = Math.max(12, tune.attackAt - 6);
+    pushFloor = Math.max(12, tune.attackAt - tune.greedDrop);
   } else if (intel.defenseTowers >= 3 && own.churches >= 1) {
-    // Never feed a small wave into a 3-4 tower fortress; wait for a real siege army.
-    pushFloor = Math.min(own.armyCap - 3, Math.max(tune.attackAt, 28));
+    pushFloor = Math.min(own.armyCap - 3, Math.max(tune.attackAt, tune.fortressPush));
     requireTrebs = 2;
   } else if (intel.totalArmy >= 22 && own.churches >= 1) {
-    // Match a large human army instead of throwing 20 into 35+.
     pushFloor = Math.min(own.armyCap - 3, Math.max(tune.attackAt, Math.min(32, intel.totalArmy)));
+  }
+
+  // 7. Goal-based economy reservation + worker resource steering (#4).
+  let ecoGoal: EcoGoal = "none";
+  let reserveGold = 0;
+  let reserveWood = 0;
+  let resourceBias: ResourceBias = "balanced";
+
+  if (needGuardDogs && own.needsGuardDogUpgrade) {
+    ecoGoal = "guard-dogs";
+    reserveGold = UPGRADE_COST[0];
+    resourceBias = own.gold < reserveGold ? "gold" : "balanced";
+  } else if (
+    own.ecoFull &&
+    own.hasForwardHouse &&
+    own.churches < tune.churchGoal &&
+    !emergencyDefend &&
+    intel.approachingHome < 5 &&
+    own.armyUsed >= 12 &&
+    own.gold >= tune.churchSaveAt &&
+    !(bankForTreb && own.trebs === 0)
+  ) {
+    // Pause trickle spending so we sprint to 500g and consecrate a Church cleanly.
+    ecoGoal = "church";
+    reserveGold = CHURCH_UPGRADE_GOLD;
+    resourceBias = "gold";
+  } else if (bankForTreb) {
+    ecoGoal = "trebuchet";
+    reserveGold = 150;
+    reserveWood = 200;
+    resourceBias = own.wood < 200 ? "wood" : own.gold < 150 ? "gold" : "balanced";
+  } else if (own.ecoFull && own.catapults < wantCatapults && (intel.totalArmy >= 6 || intel.defenseTowers >= 3)) {
+    ecoGoal = "catapult";
+    reserveGold = BUILD_COST.catapult.gold;
+    reserveWood = BUILD_COST.catapult.wood;
+    resourceBias = own.wood < reserveWood ? "wood" : own.gold < reserveGold ? "gold" : "balanced";
+  } else if (own.ecoFull && own.ballistas < wantBallistas) {
+    ecoGoal = "ballista";
+    reserveGold = BUILD_COST.ballista.gold;
+    reserveWood = BUILD_COST.ballista.wood;
+    resourceBias = own.wood < reserveWood ? "wood" : own.gold < reserveGold ? "gold" : "balanced";
+  } else if (own.ecoFull && own.barracksBelowMax) {
+    ecoGoal = "barracks-upgrade";
+    resourceBias = own.gold < 140 && own.wood > 160 ? "gold" : "balanced";
+  }
+
+  // 8. Mid-map staging & tactical retreat (#2).
+  const mem = assaultMemory[team];
+  const keepThreatened =
+    (own.keepHpRatio < 0.85 && intel.approachingHome >= 4) || emergencyDefend;
+  const alreadyPushing = own.currentLayer === "assault";
+  const hasSiege =
+    requireTrebs > 0
+      ? own.trebs >= requireTrebs || (own.trebs >= 1 && own.rams >= 2)
+      : intel.defenseTowers < 2 || own.trebs >= 1 || own.rams >= 1;
+  const cappedOut = own.armyUsed >= Math.max(tune.attackAt, own.armyCap - 2);
+
+  // Detect stalled fortress push: we went in with siege, all siege got sniped, enemy keep is still healthy.
+  const siegeWipedMidPush =
+    alreadyPushing &&
+    mem.wasAssaulting &&
+    mem.hadSiegeOnPush &&
+    intel.defenseTowers >= 2 &&
+    own.trebs === 0 &&
+    own.rams === 0 &&
+    own.enemyKeepHpRatio > tune.retreatKeepHp &&
+    own.armyUsed >= 7 &&
+    !cappedOut;
+
+  if (siegeWipedMidPush) {
+    mem.retreatUntil = own.time + 18;
+    mem.wasAssaulting = false;
+    mem.hadSiegeOnPush = false;
+  }
+
+  const regrouping = own.time < mem.retreatUntil && !cappedOut && own.trebs === 0;
+  if (regrouping) {
+    stance = "regroup";
+  }
+
+  const attackReady =
+    !keepThreatened &&
+    !regrouping &&
+    (cappedOut ||
+      (alreadyPushing && own.armyUsed >= Math.max(6, Math.floor(pushFloor / 2.2))) ||
+      (own.armyUsed >= pushFloor && hasSiege));
+
+  let desiredLayer: DefendLayerId;
+  if (attackReady) {
+    desiredLayer = "assault";
+    if (!mem.wasAssaulting) {
+      mem.hadSiegeOnPush = own.trebs >= 1 || own.rams >= 2;
+    } else if (own.trebs >= 1) {
+      mem.hadSiegeOnPush = true;
+    }
+    mem.wasAssaulting = true;
+  } else {
+    mem.wasAssaulting = false;
+    mem.hadSiegeOnPush = false;
+    // Hold midfield/bridges once eco is rolling & we have a real staging force; otherwise defend Home.
+    const canHoldMid =
+      !keepThreatened &&
+      own.ecoFull &&
+      own.armyUsed >= tune.midStageAt &&
+      intel.approachingHome < 6;
+    desiredLayer = canHoldMid ? "mid" : "home";
   }
 
   // Normalize percentages cleanly so levy gets the remainder.
@@ -261,9 +436,15 @@ export function adaptDoctrinePlan(
     wardPct,
     archerPct,
     runnerPct,
+    earlyScreenGoal,
     pushFloor,
     requireTrebs,
     upgradePref,
+    desiredLayer,
+    ecoGoal,
+    reserveGold,
+    reserveWood,
+    resourceBias,
   };
 }
 
