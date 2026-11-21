@@ -3,7 +3,7 @@ export type AiStyle = "reactive" | "army" | "siege" | "towers" | "doctrine";
 
 export const selfPlayBook: { games: number; wins: Record<AiStyle, number> } = {
   games: 60,
-  wins: { reactive: 1, army: 4, siege: 1, towers: 4, doctrine: 48 },
+  wins: { reactive: 1, army: 4, siege: 1, towers: 4, doctrine: 47 },
 };
 
 export function bestSelfPlayStyle(): AiStyle {

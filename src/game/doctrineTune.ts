@@ -18,9 +18,9 @@ export type DoctrineTune = {
 };
 
 export const doctrineTune: DoctrineTune = {
-  attackAt: 16,
+  attackAt: 20,
   trebGoal: 5,
-  ramGoal: 6,
+  ramGoal: 2,
   spyGoal: 1,
   escortGap: 34,
   standoff: 175,

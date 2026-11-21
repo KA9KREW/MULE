@@ -4720,11 +4720,8 @@ export class GameSim {
         v.timer -= dt;
         if (v.timer <= 0) {
           node.loadsLeft -= 1;
-          const brain = foeBrainStats();
-          const mult =
-            team === "you" || this.matchMode === "pvp"
-              ? gMult
-              : gMult * (1 + Math.min(0.24, brain.games * 0.012));
+          // Fair 1× gather rate for both human and AI teams.
+          const mult = gMult;
           v.carryingGold = Math.round(node.goldPerLoad * mult);
           v.carryingWood = Math.round(node.woodPerLoad * mult);
           v.state = "toKeep";
