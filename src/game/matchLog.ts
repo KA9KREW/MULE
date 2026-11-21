@@ -25,6 +25,7 @@ export interface MatchTimelinePoint {
   foeTrebs: number;
   foeRams: number;
   foeLayer: string | null;
+  foeStance?: string;
 }
 
 export interface HumanMatchLog {

@@ -128,7 +128,7 @@ import {
   duelRung,
   promoteRung,
 } from "./arena";
-import { foeBrainStats, notifyAiMatchEnd, notifyAiMatchStart, runAiTurn } from "./ai";
+import { doctrineStanceOf, foeBrainStats, notifyAiMatchEnd, notifyAiMatchStart, runAiTurn } from "./ai";
 import { bestSelfPlayStyle, type AiStyle } from "./selfPlayBook";
 import { doctrineTune as savedDoctrineTune, type DoctrineTune } from "./doctrineTune";
 import { saveHumanLog, type HumanBuildStep, type MatchTimelinePoint } from "./matchLog";
@@ -4836,6 +4836,7 @@ export class GameSim {
       foeTrebs: s.units.filter((u) => u.team === "foe" && u.hp > 0 && u.kind === "trebuchet").length,
       foeRams: s.units.filter((u) => u.team === "foe" && u.hp > 0 && u.kind === "rammer").length,
       foeLayer: s.defendLayer.foe,
+      foeStance: doctrineStanceOf("foe"),
     });
   }
 

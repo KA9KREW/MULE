@@ -1,7 +1,14 @@
 import type { GameSim } from "./sim";
+import { adaptDoctrinePlan, pickAdaptiveScreenUnit, scoutEnemy, type AdaptiveStance } from "./doctrineAdapt";
 import { getFoeBrain, type LearnFeatures } from "./learningAi";
 import { bestSelfPlayStyle, type AiStyle } from "./selfPlayBook";
 import type { Team, TrainKind } from "./types";
+
+const activeStance: Record<Team, AdaptiveStance> = { you: "standard", foe: "standard" };
+
+export function doctrineStanceOf(team: Team = "foe"): AdaptiveStance {
+  return activeStance[team];
+}
 
 function featuresFrom(sim: GameSim, team: Team): LearnFeatures {
   const s = sim.getState();
@@ -124,15 +131,15 @@ function zoneOf(sim: GameSim, team: Team, padId: string | undefined) {
 }
 
 /**
- * Full yard and peon cap, upgraded barracks (damage + rate), ballista defense,
- * churches, and siege/screen composition driven by the evolved DoctrineTune.
+ * Full yard and peon cap, upgraded barracks (damage + rate), ballista/catapult
+ * defense, churches, and on-the-fly adaptive counters driven by visible enemy
+ * buildings and field units.
  */
 function doctrineCommander(sim: GameSim, team: Team) {
   sim.aiAssignWorkers(team);
   if (sim.peonSlotsUsed(team) < sim.peonCap(team)) sim.enqueuePeon(team);
   const state = sim.getState();
-  const enemy = team === "foe" ? "you" : "foe";
-  const seen = featuresFrom(sim, team);
+  const intel = scoutEnemy(sim, team);
   const buildings = sim.getBuildings(team);
   const ecoPads = sim.getPads(team).filter((p) => p.zone === "eco").length;
   const yard = buildings.filter((b) => b.kind === "house" && zoneOf(sim, team, b.padId) === "eco").length;
@@ -153,22 +160,24 @@ function doctrineCommander(sim: GameSim, team: Team) {
   const spies = countKind("spy");
   const tune = sim.getDoctrineTune(team);
   const ecoFull = yard >= ecoPads && sim.peonSlotsUsed(team) >= sim.peonCap(team);
-  const enemyTrebs = state.units.filter((u) => u.team === enemy && u.hp > 0 && u.kind === "trebuchet").length;
-  const enemyDefenseTowers = state.buildings.filter(
-    (b) =>
-      b.team === enemy &&
-      b.hp > 0 &&
-      (b.kind === "watchtower" || b.kind === "ballista" || b.kind === "catapult"),
-  ).length;
-  const fortified = enemyDefenseTowers >= 3 || (state.time >= 220 && enemyDefenseTowers >= 2);
-  const lateDefense = ecoFull && (churches >= 1 || state.time >= 200 || seen.yourArmy >= 10);
-  const wantBallistas = lateDefense ? Math.max(tune.ballistaGoal, 2) : tune.ballistaGoal;
-  const wantCatapults = lateDefense ? 1 : 0;
-  const wantTrebs = ecoFull ? (fortified ? tune.trebGoal : enemyDefenseTowers >= 2 ? Math.min(tune.trebGoal, 2) : 0) : 0;
-  const wantRams = ecoFull ? tune.ramGoal : 0;
-  const wantSpies = ecoFull && (enemyTrebs > 0 || enemyDefenseTowers >= 3) ? Math.max(tune.spyGoal, enemyTrebs > 0 ? 2 : 1) : 0;
+  const armyUsed = sim.armySlotsUsed(team);
+  const armyCap = sim.armyCap(team);
+  const keepHpRatio = state.keeps[team].hp / Math.max(1, state.keeps[team].maxHp);
 
-  if (yard < 1) sim.placeAiBuilding("house", 0, team, "eco");
+  const plan = adaptDoctrinePlan(tune, intel, {
+    time: state.time,
+    ecoFull,
+    churches,
+    armyUsed,
+    armyCap,
+    trebs,
+    keepHpRatio,
+  });
+  activeStance[team] = plan.stance;
+
+  if (plan.emergencyDefend && ballistas.length < 1) {
+    sim.placeAiBuilding("ballista", 0, team);
+  } else if (yard < 1) sim.placeAiBuilding("house", 0, team, "eco");
   else if (tune.ecoFirst >= 1 && yard < ecoPads) sim.placeAiBuilding("house", 0, team, "eco");
   else if (ballistas.length < tune.ballistaGoal) sim.placeAiBuilding("ballista", 0, team);
   else if (barracks < tune.barracksGoal) sim.placeAiBuilding("barracks", 0, team);
@@ -176,56 +185,55 @@ function doctrineCommander(sim: GameSim, team: Team) {
   else if (barsBusy && barracks < 3) sim.placeAiBuilding("barracks", 0, team);
   else if (forward + churches < 2) sim.placeAiBuilding("house", 0, team, "midEco");
   else if (churches < tune.churchGoal) sim.aiConsecrate(team);
-  else if (ballistas.length < wantBallistas) sim.placeAiBuilding("ballista", 0, team);
-  else if (catapults.length < wantCatapults) sim.placeAiBuilding("catapult", 0, team);
+  else if (ballistas.length < plan.wantBallistas) sim.placeAiBuilding("ballista", 0, team);
+  else if (catapults.length < plan.wantCatapults) sim.placeAiBuilding("catapult", 0, team);
   else if (barracks < 3 && state.gold[team] >= 220 && state.wood[team] >= 140) {
     sim.placeAiBuilding("barracks", 0, team);
   }
 
-  if (tune.barricades >= 1 && (seen.yourArmy >= 4 || state.waveIndex >= 2) && ballistas.length >= 1) {
+  if (
+    tune.barricades >= 1 &&
+    (plan.emergencyDefend || intel.approachingHome >= 4 || state.waveIndex >= 2) &&
+    ballistas.length >= 1
+  ) {
     sim.aiBuildDefensiveBarricade(team);
+  }
+  if (plan.needGuardDogs && ballistas.some((b) => b.rateRank < 1)) {
+    sim.aiUpgradeDefense("rate", team);
   }
   if (ecoFull) sim.aiUpgradeBarracks(team);
   const defenses = [...ballistas, ...catapults];
   if (defenses.some((b) => b.damageRank < 2 || b.rateRank < 2) && state.gold[team] >= 160) {
-    sim.aiUpgradeDefense("adaptive", team);
+    sim.aiUpgradeDefense(plan.upgradePref, team);
   }
 
-  const pickScreen = (slot: number): TrainKind => {
-    const roll = (slot * 17) % 100;
-    if (roll < tune.wardPct) return "ward";
-    if (roll < tune.wardPct + tune.archerPct) return "archer";
-    return "levy";
-  };
-
-  const armyUsed = sim.armySlotsUsed(team);
-  const armyCap = sim.armyCap(team);
-  // Actively bank 200 timber for trebuchets whenever the opponent has 3+ towers.
-  const bankForTreb = ecoFull && fortified && trebs < Math.min(wantTrebs, 3) && armyUsed >= 8;
-  const needFirstSiege = ecoFull && enemyDefenseTowers >= 2 && trebs === 0 && rams === 0;
+  const needFirstSiege = ecoFull && intel.defenseTowers >= 2 && trebs === 0 && rams === 0;
   if (barracks >= 1) {
     const tick = Math.floor(state.time / 3);
     if (!ecoFull) {
-      const needEarly = seen.yourArmy >= 2 ? Math.max(tune.earlyScreen, 4) : tune.earlyScreen;
-      if (armyUsed < needEarly) sim.aiEnqueueTrain(pickScreen(tick), team);
+      const needEarly =
+        plan.emergencyDefend || intel.approachingHome >= 2
+          ? Math.max(tune.earlyScreen, 5)
+          : tune.earlyScreen;
+      if (armyUsed < needEarly) sim.aiEnqueueTrain(pickAdaptiveScreenUnit(plan, tick), team);
     } else {
       for (let b = 0; b < barracks; b++) {
         const w = state.wood[team];
         const g = state.gold[team];
         const slotsLeft = armyCap - sim.armySlotsUsed(team);
-        if (b === 0 && trebs < wantTrebs && w >= 200 && g >= 150) {
+        if (b === 0 && trebs < plan.wantTrebs && w >= 200 && g >= 150) {
           sim.aiEnqueueTrain("trebuchet", team);
-        } else if (b === 0 && !bankForTreb && rams < wantRams && w >= 100 && g >= 75) {
+        } else if (b === 0 && !plan.bankForTreb && rams < plan.wantRams && w >= 100 && g >= 75) {
           sim.aiEnqueueTrain("rammer", team);
-        } else if (b === 0 && spies < wantSpies && g >= 165) {
+        } else if (b === 0 && spies < plan.wantSpies && g >= 165) {
           sim.aiEnqueueTrain("spy", team);
-        } else if ((needFirstSiege || bankForTreb) && slotsLeft <= 2) {
-          // Leave room for a treb or ram instead of filling the last cap slots with screen.
-        } else if (bankForTreb && w < 200) {
+        } else if ((needFirstSiege || plan.bankForTreb) && slotsLeft <= 2) {
+          // Reserve final cap slots for siege engines instead of filling them with screen.
+        } else if (plan.bankForTreb && w < 200) {
           // Spend gold on wood-free levies while banking 200 timber for the trebuchet.
           if (g >= 60) sim.aiEnqueueTrain("levy", team);
         } else {
-          const pick = pickScreen(tick + b);
+          const pick = pickAdaptiveScreenUnit(plan, tick + b);
           const train: TrainKind = needFirstSiege && pick === "archer" && w < 180 ? "levy" : pick;
           sim.aiEnqueueTrain(train, team);
         }
@@ -234,20 +242,18 @@ function doctrineCommander(sim: GameSim, team: Team) {
   }
 
   const keepThreatened =
-    state.keeps[team].hp < state.keeps[team].maxHp * 0.85 && seen.yourArmy >= 4;
+    (keepHpRatio < 0.85 && intel.approachingHome >= 4) || plan.emergencyDefend;
   const alreadyPushing = state.defendLayer[team] === "assault";
-  const needBigPush = enemyDefenseTowers >= 3 && churches >= 1;
-  const pushFloor = needBigPush ? Math.min(armyCap - 3, Math.max(tune.attackAt, 28)) : tune.attackAt;
   const hasSiege =
-    enemyDefenseTowers >= 3
-      ? trebs >= 2 || (trebs >= 1 && rams >= 1)
-      : enemyDefenseTowers < 2 || trebs >= 1 || rams >= 1;
+    plan.requireTrebs > 0
+      ? trebs >= plan.requireTrebs || (trebs >= 1 && rams >= 2)
+      : intel.defenseTowers < 2 || trebs >= 1 || rams >= 1;
   const cappedOut = armyUsed >= Math.max(tune.attackAt, armyCap - 2);
   const attackReady =
     !keepThreatened &&
     (cappedOut ||
-      (alreadyPushing && armyUsed >= Math.max(6, Math.floor(pushFloor / 2.2))) ||
-      (armyUsed >= pushFloor && hasSiege));
+      (alreadyPushing && armyUsed >= Math.max(6, Math.floor(plan.pushFloor / 2.2))) ||
+      (armyUsed >= plan.pushFloor && hasSiege));
   if (attackReady) sim.setDefendLayer("assault", team);
   else sim.setDefendLayer("home", team);
 }
