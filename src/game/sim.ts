@@ -2261,7 +2261,7 @@ export class GameSim {
       if (this.state.villagers.filter((v) => v.team === team).length >= this.peonCap(team)) continue;
       const idx = this.state.villagers.filter((v) => v.team === team).length;
       const scale = this.combatScale(team);
-      this.state.villagers.push({
+      const peon: Villager = {
         id: this.next(),
         team,
         pos: villagerStart(team, idx % 3),
@@ -2274,9 +2274,34 @@ export class GameSim {
         carryingGold: 0,
         carryingWood: 0,
         attackTimer: 0,
-      });
-      this.tell(team, "Peon ready.");
+      };
+      this.state.villagers.push(peon);
+      // Automatically send newly produced peons straight to work on the best open grove/mine.
+      const teamPeons = this.state.villagers.filter((v) => v.team === team && v.hp > 0);
+      for (const node of this.state.nodes) {
+        if (node.team !== team) continue;
+        node.workers = teamPeons.filter((v) => v.targetNodeId === node.id).length;
+      }
+      const workNode = this.pickWorkNode(team);
+      if (workNode) {
+        workNode.workers += 1;
+        peon.targetNodeId = workNode.id;
+        peon.state = "toNode";
+        if (team === this.localTeam) this.state.firstVillagerAssigned = true;
+        this.tell(
+          team,
+          workNode.kind === "pine"
+            ? "Peon ready — heading to pine grove."
+            : "Peon ready — heading to copper mine.",
+        );
+      } else {
+        this.tell(team, "Peon ready.");
+      }
     }
+  }
+
+  notify(text: string) {
+    this.addToast(text);
   }
 
   private addToast(text: string) {

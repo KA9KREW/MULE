@@ -135,6 +135,29 @@ function fullscreenSupported() {
   return Boolean(document.fullscreenEnabled || el.requestFullscreen || el.webkitRequestFullscreen);
 }
 
+type KeyboardLockNav = Navigator & {
+  keyboard?: {
+    lock?: (keyCodes?: string[]) => Promise<void>;
+    unlock?: () => void;
+  };
+};
+
+function lockEscapeKey() {
+  try {
+    void (navigator as KeyboardLockNav).keyboard?.lock?.(["Escape"])?.catch(() => {});
+  } catch {
+    /* unsupported browser */
+  }
+}
+
+function unlockEscapeKey() {
+  try {
+    (navigator as KeyboardLockNav).keyboard?.unlock?.();
+  } catch {
+    /* unsupported browser */
+  }
+}
+
 interface TapMarker {
   id: number;
   x: number;
@@ -173,6 +196,10 @@ export default function App() {
   const [triumph, setTriumph] = useState<{ id: number; unlock: string } | null>(null);
   const fullscreenRequestRef = useRef<Promise<void> | null>(null);
   const fullscreenTriedRef = useRef(false);
+  /** Timestamp of last Esc tap in overhead fullscreen (double-tap within 650ms exits fullscreen). */
+  const lastEscFullscreenRef = useRef(0);
+  /** Timestamp when Esc released FPS possess so that tap never counts toward exiting fullscreen. */
+  const possessEscAtRef = useRef(0);
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   const patrolModeRef = useRef(false);
   const selectionBoxRef = useRef<{ left: number; top: number; width: number; height: number } | null>(null);
@@ -262,6 +289,7 @@ export default function App() {
     try {
       if (fullscreenElement()) {
         fullscreenWantedRef.current = false;
+        unlockEscapeKey();
         if (d.exitFullscreen) await d.exitFullscreen();
         else await d.webkitExitFullscreen?.();
       } else {
@@ -710,7 +738,12 @@ export default function App() {
       const on = Boolean(fullscreenElement());
       setIsFullscreen(on);
       requestAnimationFrame(() => rendererRef.current?.resize());
-      if (on) void tryLockLandscape();
+      if (on) {
+        lockEscapeKey();
+        void tryLockLandscape();
+      } else {
+        unlockEscapeKey();
+      }
     };
     /** Stay fullscreen by default — re-enter on any gesture while still wanted (esp. phones). */
     const enter = () => {
@@ -788,8 +821,12 @@ export default function App() {
       if (possessed && ev.key === "Escape") {
         ev.preventDefault();
         if (sim.getMatchMode() === "arena") return;
+        // Single tap Esc returns to overhead RTS view while keeping fullscreen intact.
+        possessEscAtRef.current = performance.now();
+        lastEscFullscreenRef.current = 0;
+        lockWantedRef.current = false;
         sim.releasePossess("esc");
-        document.exitPointerLock();
+        if (document.pointerLockElement) document.exitPointerLock();
         refreshUi();
         return;
       }
@@ -828,10 +865,22 @@ export default function App() {
         sim.togglePause();
       }
       if (ev.key === "Escape") {
+        ev.preventDefault();
+        const now = performance.now();
         sim.cancelSelection();
         setPatrol(false);
         setRadial(null);
         setClusterOpen(false);
+        // Require a double-tap of Esc (within 650ms) in overhead view to exit fullscreen.
+        if (fullscreenElement() && now - possessEscAtRef.current > 350) {
+          if (now - lastEscFullscreenRef.current <= 650) {
+            lastEscFullscreenRef.current = 0;
+            void toggleFullscreen();
+          } else {
+            lastEscFullscreenRef.current = now;
+            sim.notify("Double-tap Esc to exit fullscreen.");
+          }
+        }
       }
       if (ev.key === "Enter" && skirmish.liveRef.current && sim.getState().phase === "running") {
         ev.preventDefault();
@@ -912,6 +961,8 @@ export default function App() {
       if (!lockWantedRef.current) return;
       lockWantedRef.current = false;
       if (sim.getState().possessedId == null) return;
+      possessEscAtRef.current = performance.now();
+      lastEscFullscreenRef.current = 0;
       sim.releasePossess("esc");
       setUi(sim.getUiSnapshot());
     };
