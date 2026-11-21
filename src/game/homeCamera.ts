@@ -13,11 +13,11 @@ export function homeCameraFrame(team: Team) {
   const keepZ = WORLD_H / 2 - KEEP_MARGIN;
   // Aim a little toward the field so the keep sits mid-frame and the eco yard
   // fills the near ground behind it.
-  const lookDepth = keepZ - 36;
+  const lookDepth = keepZ - 20;
   return {
     yaw: north ? Math.PI - 0.12 : 0.12,
-    pitch: 0.98,
-    dist: 720,
+    pitch: 0.92,
+    dist: 1000,
     lookX: 0,
     lookY: 14,
     lookZ: north ? -lookDepth : lookDepth,
