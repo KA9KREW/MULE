@@ -1,5 +1,5 @@
 import type { GameSim } from "./sim";
-import { getFoeBrain, type LearnAction, type LearnFeatures } from "./learningAi";
+import { getFoeBrain, type LearnFeatures } from "./learningAi";
 import type { TrainKind } from "./types";
 
 function featuresFrom(sim: GameSim): LearnFeatures {
@@ -28,126 +28,62 @@ function featuresFrom(sim: GameSim): LearnFeatures {
   };
 }
 
-function applyAction(sim: GameSim, action: LearnAction) {
-  switch (action) {
-    case "build_watch":
-      if (!sim.placeAiBuilding("watchtower")) sim.aiTrainUnits();
-      break;
-    case "build_ballista":
-      if (!sim.placeAiBuilding("ballista")) sim.aiTrainUnits();
-      break;
-    case "build_catapult":
-      if (!sim.placeAiBuilding("catapult")) sim.aiTrainUnits();
-      break;
-    case "build_barracks":
-      if (!sim.placeAiBuilding("barracks")) sim.aiTrainUnits();
-      break;
-    case "train_levy":
-      if (!sim.aiEnqueueTrain("levy")) fallbackMacro(sim);
-      break;
-    case "train_runner":
-      if (!sim.aiEnqueueTrain("runner")) fallbackMacro(sim);
-      break;
-    case "train_archer":
-      if (!sim.aiEnqueueTrain("archer")) fallbackMacro(sim);
-      break;
-    case "train_ward":
-      if (!sim.aiEnqueueTrain("ward")) fallbackMacro(sim);
-      break;
-    case "train_rammer":
-      if (!sim.aiEnqueueTrain("rammer")) fallbackMacro(sim);
-      break;
-    case "upgrade":
-      if (!sim.aiUpgradeDefense("adaptive")) fallbackMacro(sim);
-      break;
-    case "upgrade_damage":
-      if (!sim.aiUpgradeDefense("damage")) fallbackMacro(sim);
-      break;
-    case "upgrade_rate":
-      if (!sim.aiUpgradeDefense("rate")) fallbackMacro(sim);
-      break;
-    case "econ":
-      sim.aiAssignWorkers();
-      break;
-    case "wait":
-    default:
-      // Still gather so idle ticks aren't wasted
-      sim.aiAssignWorkers();
-      break;
-  }
-}
-
-/** If the chosen micro-action fails (no gold / no pad), keep pressure. */
-function fallbackMacro(sim: GameSim) {
-  const foes = sim.getBuildings("foe");
-  if (foes.length < 2) {
-    sim.placeAiBuilding("watchtower");
-    return;
-  }
-  if (!foes.some((b) => b.kind === "barracks")) {
-    sim.placeAiBuilding("barracks");
-    return;
-  }
-  sim.aiTrainUnits();
-}
-
 export function runAiTurn(sim: GameSim, _reserve: number) {
-  const brain = getFoeBrain();
-  const skill = brain.stats().intellect;
+  // Rush timing still tightens as the saved brain gains games. Build and train
+  // choices come from the board, not from that table's random early actions.
+  const skill = Math.max(48, getFoeBrain().stats().intellect);
   const state = sim.getState();
+  const seen = featuresFrom(sim);
   sim.aiAssignWorkers();
 
-  // Defensive opening book: establish population, saturate economy, and cover
-  // both lanes before spending heavily on aggression.
-  const houses = sim.getBuildings("foe").filter((b) => b.kind === "house").length;
-  const desiredHouses = state.waveIndex >= 4 ? 3 : state.waveIndex >= 2 ? 2 : 1;
-  if (houses < desiredHouses && state.wood.foe >= 55) {
+  const buildings = sim.getBuildings("foe");
+  const houses = buildings.filter((b) => b.kind === "house");
+  const defenses = buildings.filter(
+    (b) => b.kind === "watchtower" || b.kind === "ballista" || b.kind === "catapult",
+  );
+  const barracks = buildings.filter((b) => b.kind === "barracks");
+  const watches = defenses.filter((b) => b.kind === "watchtower").length;
+  const ballistas = defenses.filter((b) => b.kind === "ballista").length;
+  const catapults = defenses.filter((b) => b.kind === "catapult").length;
+  const pressed = seen.hpLead < -50 || seen.yourArmy >= 5;
+
+  const desiredHouses = pressed ? Math.min(2, Math.max(1, houses.length)) : seen.wave >= 5 ? 3 : seen.wave >= 2 ? 2 : 1;
+  if (houses.length < desiredHouses && state.wood.foe >= 55) {
     sim.placeAiBuilding("house", 0);
   }
   if (sim.peonSlotsUsed("foe") < sim.peonCap("foe")) {
     sim.enqueuePeon("foe");
   }
 
-  const defenses = sim
-    .getBuildings("foe")
-    .filter((b) => b.kind === "watchtower" || b.kind === "ballista" || b.kind === "catapult");
-  const desiredDefenses = state.waveIndex < 2 ? 2 : state.waveIndex < 5 ? 3 : 4;
-  if (defenses.length < desiredDefenses) {
-    const watches = defenses.filter((b) => b.kind === "watchtower").length;
-    const ballistas = defenses.filter((b) => b.kind === "ballista").length;
-    const catapults = defenses.filter((b) => b.kind === "catapult").length;
-    const next =
-      watches < 2
-        ? "watchtower"
-        : ballistas < 1
-          ? "ballista"
-          : catapults < 1
-            ? "catapult"
-            : "ballista";
-    sim.placeAiBuilding(next, skill >= 45 ? 0 : 10);
+  // Answer the army that has actually been seen. Open with one tower and a
+  // barracks so the foe fights instead of copying the same four-tower wall.
+  const wantWatch = seen.yourRanged >= 2 ? 2 : 1;
+  const wantBallista = seen.yourFast >= 2 || seen.wave >= 3 ? 1 : 0;
+  const wantCatapult = seen.yourHeavy >= 2 || seen.yourTowers >= 3 || seen.wave >= 5 ? 1 : 0;
+  if (watches < wantWatch) {
+    sim.placeAiBuilding("watchtower", 0);
+  } else if (barracks.length === 0) {
+    sim.placeAiBuilding("barracks", 0);
+  } else if (ballistas < wantBallista) {
+    sim.placeAiBuilding("ballista", 0);
+  } else if (catapults < wantCatapult) {
+    sim.placeAiBuilding("catapult", 0);
+  } else if (!pressed && defenses.length < 3 && seen.wave >= 3) {
+    sim.placeAiBuilding(seen.yourFast > seen.yourHeavy ? "ballista" : "watchtower", 0);
   }
-  if (defenses.length >= 2 && state.waveIndex >= 1) {
+
+  if (defenses.length >= 1 && seen.wave >= 1) {
     sim.aiBuildDefensiveBarricade();
   }
+  if (barracks.length > 0) sim.aiTrainUnits();
 
-  const barracks = sim.getBuildings("foe").filter((b) => b.kind === "barracks");
-  if (barracks.length === 0 && state.waveIndex >= 1 && defenses.length >= 2) {
-    sim.placeAiBuilding("barracks", 10);
-  } else if (barracks.length > 0) {
-    // Keep production active; failed attempts are harmless when resources are
-    // reserved or queues are full.
-    sim.aiTrainUnits();
+  const upgrade =
+    seen.yourFast >= 2 ? "rate" : seen.yourHeavy >= 2 || seen.yourTowers >= 3 ? "damage" : "adaptive";
+  if (defenses.length >= 1 && (pressed || state.gold.foe > 110)) {
+    sim.aiUpgradeDefense(upgrade);
   }
   sim.aiCoordinateRush(skill);
-
-  const action = brain.choose(featuresFrom(sim));
-  applyAction(sim, action);
-
-  // Experienced brains execute a second macro action instead of waiting a
-  // full decision cycle while floating resources.
-  if (skill >= 45 && state.gold.foe > 120) {
-    if (!sim.aiUpgradeDefense("adaptive")) sim.aiTrainUnits();
-  }
+  if (state.gold.foe > 150 && barracks.length > 0) sim.aiTrainUnits();
 }
 
 export function notifyAiMatchStart() {
