@@ -33,7 +33,9 @@ import {
   FOE_SIEGE_Y,
   HOUSE_POP,
   KEEP_MARGIN,
+  KEEP_PICK_RADIUS,
   KEEP_THREAT_RADIUS,
+  buildingPickFootprint,
   MID_HOUSE_ARMY_POP,
   LEVY_VS_WARD_DAMAGE,
   MAX_PEON_QUEUE,
@@ -8442,7 +8444,10 @@ export function hitTest(s: GameState, x: number, y: number): RectHit | null {
     if (dist({ x, y }, u.pos) < (u.kind === "trebuchet" ? 24 : 16)) return { kind: "unit", id: String(u.id) };
   }
   for (const b of s.buildings) {
-    if (dist({ x, y }, b.pos) < 28) return { kind: "building", id: String(b.id) };
+    const fp = buildingPickFootprint(b.kind);
+    const dx = (x - b.pos.x) / fp.rx;
+    const dy = (y - b.pos.y) / fp.rz;
+    if (dx * dx + dy * dy <= 1) return { kind: "building", id: String(b.id) };
   }
   // Resources win over overlapping pads. This was why right-side groves could be
   // visibly clicked but silently selected the pad underneath.
@@ -8452,8 +8457,8 @@ export function hitTest(s: GameState, x: number, y: number): RectHit | null {
   for (const p of s.pads) {
     if (dist({ x, y }, p.pos) < 26) return { kind: "pad", id: p.id };
   }
-  if (dist({ x, y }, s.keeps.you.pos) < 40) return { kind: "keep", id: "you" };
-  if (dist({ x, y }, s.keeps.foe.pos) < 40) return { kind: "keep", id: "foe" };
+  if (dist({ x, y }, s.keeps.you.pos) < KEEP_PICK_RADIUS) return { kind: "keep", id: "you" };
+  if (dist({ x, y }, s.keeps.foe.pos) < KEEP_PICK_RADIUS) return { kind: "keep", id: "foe" };
   return null;
 }
 

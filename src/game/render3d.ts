@@ -1,7 +1,12 @@
 import * as THREE from "three";
 import {
   BUILD_RANGE,
+  buildingPickFootprint,
   dogRange,
+  KEEP_DONJON_RADIUS,
+  KEEP_DONJON_TOP,
+  KEEP_PICK_RADIUS,
+  KEEP_PICK_TOP,
   POSSESS_FOV_TIGHT,
   POSSESS_FOV_WIDE,
   POSSESS_PULL_MAX,
@@ -1653,6 +1658,134 @@ export class GameRenderer {
     return Math.sqrt(distSq) / effR + camDist * 1e-5;
   }
 
+  /** Distance along the ray to the ground plane, or Infinity if the ray never meets it in front of the camera. */
+  private rayGroundT(): number {
+    const ray = this.raycaster.ray;
+    const dy = ray.direction.y;
+    if (dy >= -1e-6) return Infinity;
+    return -ray.origin.y / dy;
+  }
+
+  /**
+   * Vertical elliptical cylinder matching a structure's footprint, plus its roof cap.
+   * Hits past the ground plane are ignored so a structure behind a pad cannot swallow the click.
+   * Score is 0 at the axis and 1 at the rim (lower wins).
+   */
+  private verticalFootprintScore(cx: number, cz: number, topY: number, rx: number, rz: number): number | null {
+    const ray = this.raycaster.ray;
+    const ox = ray.origin.x - cx;
+    const oy = ray.origin.y;
+    const oz = ray.origin.z - cz;
+    const dx = ray.direction.x;
+    const dy = ray.direction.y;
+    const dz = ray.direction.z;
+    const tMax = this.rayGroundT() + 1.25;
+    const rx2 = rx * rx;
+    const rz2 = rz * rz;
+    const A = (dx * dx) / rx2 + (dz * dz) / rz2;
+    const B = 2 * ((ox * dx) / rx2 + (oz * dz) / rz2);
+    const C = (ox * ox) / rx2 + (oz * oz) / rz2 - 1;
+    let best = Infinity;
+    const take = (t: number, radial: number) => {
+      if (!(t > this.camera.near) || t > tMax) return;
+      const y = oy + t * dy;
+      if (y < -0.75 || y > topY + 1.25) return;
+      const score = radial + t * 1e-5;
+      if (score < best) best = score;
+    };
+    if (A <= 1e-8) {
+      if (C <= 0) take(dy < -1e-6 ? Math.max(this.camera.near + 0.05, -oy / dy) : this.camera.near + 0.05, 0);
+    } else {
+      const disc = B * B - 4 * A * C;
+      if (disc >= -1e-5) {
+        const s = Math.sqrt(Math.max(0, disc));
+        const inv = 0.5 / A;
+        const t0 = (-B - s) * inv;
+        const t1 = (-B + s) * inv;
+        take(t0, Math.sqrt(((ox + t0 * dx) ** 2) / rx2 + ((oz + t0 * dz) ** 2) / rz2));
+        take(t1, Math.sqrt(((ox + t1 * dx) ** 2) / rx2 + ((oz + t1 * dz) ** 2) / rz2));
+      }
+    }
+    if (Math.abs(dy) > 1e-6) {
+      const tTop = (topY - oy) / dy;
+      const px = ox + tTop * dx;
+      const pz = oz + tTop * dz;
+      const radial2 = (px * px) / rx2 + (pz * pz) / rz2;
+      if (radial2 <= 1) take(tTop, Math.sqrt(radial2));
+    }
+    return best === Infinity ? null : best;
+  }
+
+  /**
+   * Horizontal beam along X with an elliptical cross-section (tall and thin, like a barricade).
+   * Same ground-plane cutoff as {@link verticalFootprintScore}.
+   */
+  private beamFootprintScore(
+    cx: number,
+    cy: number,
+    cz: number,
+    halfLen: number,
+    ry: number,
+    rz: number,
+  ): number | null {
+    const ray = this.raycaster.ray;
+    const ox = ray.origin.x - cx;
+    const oy = ray.origin.y - cy;
+    const oz = ray.origin.z - cz;
+    const dx = ray.direction.x;
+    const dy = ray.direction.y;
+    const dz = ray.direction.z;
+    const tMax = this.rayGroundT() + 1.25;
+    const ry2 = ry * ry;
+    const rz2 = rz * rz;
+    const A = (dy * dy) / ry2 + (dz * dz) / rz2;
+    const B = 2 * ((oy * dy) / ry2 + (oz * dz) / rz2);
+    const C = (oy * oy) / ry2 + (oz * oz) / rz2 - 1;
+    let best = Infinity;
+    const take = (t: number, radial: number) => {
+      if (!(t > this.camera.near) || t > tMax) return;
+      const x = ox + t * dx;
+      if (x < -halfLen - 0.4 || x > halfLen + 0.4) return;
+      const score = radial + t * 1e-5;
+      if (score < best) best = score;
+    };
+    if (A <= 1e-8) {
+      if (C <= 0 && Math.abs(dx) > 1e-6) {
+        const tNear = dx > 0 ? (-halfLen - ox) / dx : (halfLen - ox) / dx;
+        take(tNear, 0);
+      }
+    } else {
+      const disc = B * B - 4 * A * C;
+      if (disc >= -1e-5) {
+        const s = Math.sqrt(Math.max(0, disc));
+        const inv = 0.5 / A;
+        const t0 = (-B - s) * inv;
+        const t1 = (-B + s) * inv;
+        take(t0, Math.sqrt(((oy + t0 * dy) ** 2) / ry2 + ((oz + t0 * dz) ** 2) / rz2));
+        take(t1, Math.sqrt(((oy + t1 * dy) ** 2) / ry2 + ((oz + t1 * dz) ** 2) / rz2));
+      }
+    }
+    if (Math.abs(dx) > 1e-6) {
+      for (const xCap of [-halfLen, halfLen]) {
+        const t = (xCap - ox) / dx;
+        const py = oy + t * dy;
+        const pz = oz + t * dz;
+        const radial2 = (py * py) / ry2 + (pz * pz) / rz2;
+        if (radial2 <= 1) take(t, Math.sqrt(radial2));
+      }
+    }
+    return best === Infinity ? null : best;
+  }
+
+  /** Logs (43×3.2, stacked ~10 tall) plus the spike row. Not the old radius-9.5 sausage. */
+  private barricadeBeamScore(wx: number, wz: number): number | null {
+    const logs = this.beamFootprintScore(wx, 5.6, wz, 21.5, 5, 2.4);
+    const spikes = this.beamFootprintScore(wx, 11.5, wz, 20, 2.3, 1.8);
+    if (logs == null) return spikes;
+    if (spikes == null) return logs;
+    return logs < spikes ? logs : spikes;
+  }
+
   private setupPickRay(screenX: number, screenY: number): boolean {
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width < 1 || rect.height < 1) return false;
@@ -1674,7 +1807,7 @@ export class GameRenderer {
       if (bar.hp <= 0) continue;
       const wx = bar.pos.x - hw;
       const wz = bar.pos.y - hh;
-      const score = this.segmentRayScore(wx - 19, 5.5, wz, wx + 19, 5.5, wz, 9.5, 0.015);
+      const score = this.barricadeBeamScore(wx, wz);
       if (score != null && score < bestScore) {
         bestScore = score;
         bestId = bar.id;
@@ -1740,7 +1873,7 @@ export class GameRenderer {
         if (bar.hp <= 0) continue;
         const wx = bar.pos.x - hw;
         const wz = bar.pos.y - hh;
-        const score = this.segmentRayScore(wx - 19, 5.5, wz, wx + 19, 5.5, wz, 9.5, 0.015);
+        const score = this.barricadeBeamScore(wx, wz);
         if (score != null && score < bestBarScore) {
           bestBarScore = score;
           bestBar = { kind: "barricade", id: String(bar.id) };
@@ -1749,18 +1882,25 @@ export class GameRenderer {
       if (bestBar) return bestBar;
     }
 
-    // 3. Buildings (friendly & enemy).
+    // 3. Buildings (friendly & enemy). Footprint matches the mesh so a neighbor pad
+    // (rings start ~18 units away) is not inside this structure's click volume.
     let bestBld: RectHit | null = null;
     let bestBldScore = Infinity;
     for (const b of state.buildings) {
       if (b.hp <= 0) continue;
+      const fp = buildingPickFootprint(b.kind);
       const wx = b.pos.x - hw;
       const wz = b.pos.y - hh;
-      const topY = b.kind === "watchtower" || b.kind === "church" ? 28 : 20;
-      let score = this.segmentRayScore(wx, 0, wz, wx, topY, wz, 21, 0.016);
+      let score = this.verticalFootprintScore(wx, wz, fp.top, fp.rx, fp.rz);
+      if (fp.upper) {
+        const upper = this.verticalFootprintScore(wx, wz, fp.upper.top, fp.upper.rx, fp.upper.rz);
+        if (upper != null && (score == null || upper < score)) score = upper;
+      }
       if (score == null && hasGround) {
-        const d = Math.hypot(gx - b.pos.x, gy - b.pos.y);
-        if (d < 26) score = d / 26 + 0.5;
+        const nx = (gx - b.pos.x) / fp.rx;
+        const nz = (gy - b.pos.y) / fp.rz;
+        const radial2 = nx * nx + nz * nz;
+        if (radial2 < 1) score = Math.sqrt(radial2) + 0.5;
       }
       if (score != null && score < bestBldScore) {
         bestBldScore = score;
@@ -1814,10 +1954,16 @@ export class GameRenderer {
         if (k.hp <= 0) continue;
         const wx = k.pos.x - hw;
         const wz = k.pos.y - hh;
-        let score = this.segmentRayScore(wx, 0, wz, wx, 34, wz, 34, 0.02);
+        let score = this.verticalFootprintScore(wx, wz, KEEP_PICK_TOP, KEEP_PICK_RADIUS, KEEP_PICK_RADIUS);
+        const donjon = this.verticalFootprintScore(wx, wz, KEEP_DONJON_TOP, KEEP_DONJON_RADIUS, KEEP_DONJON_RADIUS);
+        if (donjon != null && (score == null || donjon < score)) score = donjon;
+        // Player keep is spun 180°, so the stair spire sits on the opposite corner.
+        const flip = team === "you" ? -1 : 1;
+        const spire = this.verticalFootprintScore(wx + 7 * flip, wz + 5 * flip, 54, 5, 5);
+        if (spire != null && (score == null || spire < score)) score = spire;
         if (score == null && hasGround) {
           const d = Math.hypot(gx - k.pos.x, gy - k.pos.y);
-          if (d < 40) score = d / 40 + 0.5;
+          if (d < KEEP_PICK_RADIUS) score = d / KEEP_PICK_RADIUS + 0.5;
         }
         if (score != null && score < bestKeepScore) {
           bestKeepScore = score;

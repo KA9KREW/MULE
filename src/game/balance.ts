@@ -86,6 +86,49 @@ export const BUILD_RANGE: Record<BuildingKind, number> = {
   barricade: 0,
 };
 
+export type PickVolume = { rx: number; rz: number; top: number };
+
+/**
+ * Invisible click footprint (sim units). rx is east-west, rz is north-south, top is the
+ * height where the mesh is still that wide. `upper` is a narrower volume for a spire or cross
+ * so the wide footprint does not become a floating disk above the roof.
+ * Combat pads are ≥34 apart and their rings reach 16, so a radius above ~18 covers the near
+ * side of a neighbor pad. The old shared radius (21, ground disk 26) did that for every building.
+ */
+export function buildingPickFootprint(kind: BuildingKind): PickVolume & { upper?: PickVolume } {
+  switch (kind) {
+    case "watchtower":
+      // Plinth 11×11, roof eaves ~8. Flag/spire above the lookout is only a few units wide.
+      return { rx: 10, rz: 10, top: 32, upper: { rx: 4, rz: 4, top: 41 } };
+    case "ballista":
+      // 18×18 platform; corner is ~12.7.
+      return { rx: 14.5, rz: 14.5, top: 12 };
+    case "catapult":
+      // Wheeled frame ~9–10 from center; the arm stays inside that column.
+      return { rx: 11.5, rz: 11.5, top: 20 };
+    case "barracks":
+      // Hall 32×22, roof eaves ~23 × 16. Long axis matches the roof; the short axis used to be a round r=21 bubble.
+      return { rx: 21, rz: 16.5, top: 30 };
+    case "house":
+      // Cottage roof eaves ~14.6 × 11.7.
+      return { rx: 15.5, rz: 12.5, top: 26 };
+    case "church":
+      // House hall, plus a narrow rooftop cross (arm is 12 wide and 1.4 deep).
+      return { rx: 15.5, rz: 12.5, top: 26, upper: { rx: 6.5, rz: 1.6, top: 44 } };
+    case "barricade":
+      // Logs are 43 long and 3.2 deep. Picking uses the beam test; this is the flat fallback.
+      return { rx: 22, rz: 2.6, top: 13 };
+  }
+}
+
+/** Keep curtain click radius. Corner towers reach ~28; a center eco pad's near ring is ~39.5 out. */
+export const KEEP_PICK_RADIUS = 30;
+/** Height of the wide curtain. The donjon above this is picked with KEEP_DONJON_RADIUS. */
+export const KEEP_PICK_TOP = 30;
+/** Donjon and stair tower, narrower than the curtain so the upper keep is not a 60-wide column. */
+export const KEEP_DONJON_RADIUS = 13;
+export const KEEP_DONJON_TOP = 46;
+
 /** Starter tower always reaches both road approaches at the keep (kills the gate dead-zone). */
 export const STARTER_GUARD_RANGE = 220;
 /**
