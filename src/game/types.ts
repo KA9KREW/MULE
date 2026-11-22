@@ -86,6 +86,26 @@ export interface Unit {
    * Synced over skirmish so peers see turn-in-place; cleared when undriven.
    */
   facing?: number;
+  /** Cohesive wave batch id (same wave + lane + team) so wave troops march in formation. */
+  waveBatchId?: number;
+  /** Friendly unit id this barracks unit is guarding & following (AoE2 guard). */
+  guardUnitId?: number;
+  /** Explicit AoE2 right-click attack target (enemy unit id). */
+  orderTargetUnitId?: number;
+  /** Explicit AoE2 right-click attack target (enemy building id). */
+  orderTargetBuildingId?: number;
+  /** Explicit AoE2 right-click attack target (enemy barricade id). */
+  orderTargetBarricadeId?: number;
+  /** Explicit AoE2 right-click attack target (enemy keep). */
+  orderTargetKeep?: boolean;
+  /** AoE2 patrol route endpoints. */
+  patrolA?: Vec2;
+  patrolB?: Vec2;
+  patrolToB?: boolean;
+  /** Stand ground: hold formation position and only fight enemies within reach. */
+  holdPosition?: boolean;
+  /** True when the player issued a direct micro order (move/guard/attack/patrol/hold). */
+  manualOrder?: boolean;
 }
 
 /** First-person body the local player is driving, or none. */
@@ -241,7 +261,7 @@ export interface CombatEvent {
 
 export interface CommandMarker {
   id: number;
-  kind: "move" | "gather" | "attack" | "patrol" | "rally";
+  kind: "move" | "gather" | "attack" | "patrol" | "rally" | "guard";
   pos: Vec2;
   life: number;
 }
@@ -256,6 +276,8 @@ export interface WaveQueueItem {
   team: Team;
   kind: UnitKind;
   lane: Lane;
+  batchId?: number;
+  spawnPos?: Vec2;
 }
 
 export interface WaveSpec {
@@ -320,6 +342,8 @@ export interface GameState {
   buildSelection: BuildingKind | null;
   selectedBuildingId: number | null;
   selectedVillagerIds: number[];
+  /** Selected friendly barracks units (AoE2 individual / group selection). */
+  selectedUnitIds: number[];
   /** When set, DetailSheet shows peon training at the keep. */
   selectedKeepTeam: Team | null;
   hoveredPadId: string | null;
@@ -410,6 +434,17 @@ export interface TrainOptionUi {
   lockHint: string;
 }
 
+export interface SelectedArmyUi {
+  count: number;
+  leadId: number;
+  leadLabel: string;
+  groups: { kind: UnitKind; label: string; count: number }[];
+  orderSummary: string;
+  allHolding: boolean;
+  anyManual: boolean;
+  canPossess: boolean;
+}
+
 export interface UiSnapshot {
   phase: GamePhase;
   mapId: MapId;
@@ -430,6 +465,7 @@ export interface UiSnapshot {
   foeGold: number;
   foeWood: number;
   waveLabel: string;
+  waveTheme: string;
   wavePhase: WavePhase;
   buildTimer: number;
   canRush: boolean;
@@ -441,6 +477,7 @@ export interface UiSnapshot {
   selectedBuildingKind: BuildingKind | null;
   selectedKeepTeam: Team | null;
   selectedPeonCount: number;
+  selectedArmy: SelectedArmyUi | null;
   selectedRanks: { damage: number; rate: number } | null;
   selectedCanUpgradeDamage: boolean;
   selectedCanUpgradeRate: boolean;

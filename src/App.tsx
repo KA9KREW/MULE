@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./styles.css";
-import { GameRenderer, type QualityInfo, type QualitySetting, type TouchDragMode } from "./game/render3d";
+import {
+  GameRenderer,
+  type QualityInfo,
+  type QualitySetting,
+  type ScreenPickHit,
+  type TouchDragMode,
+} from "./game/render3d";
 import { GameSim, hitTest } from "./game/sim";
 import type { BuildingKind, CombatEventKind, RectHit, TrainKind, UiSnapshot } from "./game/types";
 import { BUILD_COST } from "./game/balance";
@@ -42,6 +48,7 @@ const defaultUi: UiSnapshot = {
   foeGold: 90,
   foeWood: 80,
   waveLabel: "1/16",
+  waveTheme: "",
   wavePhase: "build",
   buildTimer: 20,
   canRush: false,
@@ -53,6 +60,7 @@ const defaultUi: UiSnapshot = {
   selectedBuildingKind: null,
   selectedKeepTeam: null,
   selectedPeonCount: 0,
+  selectedArmy: null,
   selectedRanks: null,
   selectedCanUpgradeDamage: false,
   selectedCanUpgradeRate: false,
@@ -171,6 +179,7 @@ interface RadialState {
   y: number;
   world: { x: number; y: number };
   hit: RectHit | null;
+  targetHit: ScreenPickHit | null;
 }
 
 export default function App() {
@@ -201,9 +210,14 @@ export default function App() {
   /** Timestamp when Esc released FPS possess so that tap never counts toward exiting fullscreen. */
   const possessEscAtRef = useRef(0);
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
+  const shiftClickStartRef = useRef<{ x: number; y: number } | null>(null);
+  const lastUnitClickRef = useRef<{ id: number; at: number } | null>(null);
+  const lastUnitDblClickAtRef = useRef(0);
   const patrolModeRef = useRef(false);
+  const armyPatrolModeRef = useRef(false);
   const selectionBoxRef = useRef<{ left: number; top: number; width: number; height: number } | null>(null);
   const [patrolMode, setPatrolMode] = useState(false);
+  const [armyPatrolMode, setArmyPatrolMode] = useState(false);
   const [selectionBox, setSelectionBox] = useState<{ left: number; top: number; width: number; height: number } | null>(
     null,
   );
@@ -389,12 +403,109 @@ export default function App() {
     setPatrolMode(on);
   }, []);
 
+  const setArmyPatrol = useCallback((on: boolean) => {
+    armyPatrolModeRef.current = on;
+    setArmyPatrolMode(on);
+  }, []);
+
+  /** Enter first-person control on the lead soldier of the current barracks unit selection. */
+  const possessSelected = useCallback(() => {
+    if (!sim.possessSelectedUnit()) return false;
+    const possessedId = sim.getState().possessedId;
+    const body = possessedId != null ? sim.getState().units.find((u) => u.id === possessedId) : undefined;
+    rendererRef.current?.enterPossess(sim.getPossessYaw(), body?.kind === "trebuchet");
+    setArmyPatrol(false);
+    grabPointerLock();
+    refreshUi();
+    beep(360, 0.08);
+    return true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sim, grabPointerLock, refreshUi, setArmyPatrol]);
+
   const clearLongPress = useCallback(() => {
     if (longPressRef.current) {
       window.clearTimeout(longPressRef.current.timer);
       longPressRef.current = null;
     }
   }, []);
+
+  /** AoE2-style contextual right-click / tap order for selected friendly barracks units. */
+  const issueArmyOrder = useCallback(
+    (world: { x: number; y: number }, targetHit: ScreenPickHit | null, localX: number, localY: number) => {
+      const state = sim.getState();
+      const localTeam = sim.getLocalTeam();
+      if (armyPatrolModeRef.current) {
+        sim.commandSelectedUnitsPatrol(world);
+        setArmyPatrol(false);
+        pushTapMarker(localX, localY, "patrol", "Patrol");
+        beep(390, 0.045);
+        refreshUi();
+        return;
+      }
+
+      let markerKind: TapMarker["kind"] = "move";
+      let markerLabel = "Move";
+      let soundFreq = 370;
+
+      if (targetHit?.kind === "unit") {
+        const u = state.units.find((unit) => unit.id === Number(targetHit.id) && unit.hp > 0);
+        if (u && u.team === localTeam) {
+          if (sim.commandSelectedUnitsGuard(u.id)) {
+            markerKind = "patrol";
+            markerLabel = "Guard";
+            soundFreq = 440;
+          } else {
+            sim.commandSelectedUnitsMove(world);
+          }
+        } else if (u && u.team !== localTeam) {
+          sim.commandSelectedUnitsAttackUnit(u.id);
+          markerKind = "attack";
+          markerLabel = "Attack";
+          soundFreq = 480;
+        } else {
+          sim.commandSelectedUnitsMove(world);
+        }
+      } else if (targetHit?.kind === "building") {
+        const b = state.buildings.find((bld) => bld.id === Number(targetHit.id) && bld.hp > 0);
+        if (b && b.team !== localTeam) {
+          sim.commandSelectedUnitsAttackBuilding(b.id);
+          markerKind = "attack";
+          markerLabel = "Attack";
+          soundFreq = 480;
+        } else {
+          sim.commandSelectedUnitsMove(world);
+        }
+      } else if (targetHit?.kind === "barricade") {
+        const bar = state.barricades.find((br) => br.id === Number(targetHit.id) && br.hp > 0);
+        if (bar && bar.team !== localTeam) {
+          sim.commandSelectedUnitsAttackBarricade(bar.id);
+          markerKind = "attack";
+          markerLabel = "Attack";
+          soundFreq = 480;
+        } else {
+          sim.commandSelectedUnitsMove(world);
+        }
+      } else if (targetHit?.kind === "keep") {
+        if (targetHit.id !== localTeam) {
+          sim.commandSelectedUnitsAttackKeep();
+          markerKind = "attack";
+          markerLabel = "Attack";
+          soundFreq = 480;
+        } else {
+          sim.commandSelectedUnitsMove(world);
+        }
+      } else {
+        sim.commandSelectedUnitsMove(world);
+      }
+
+      pushTapMarker(localX, localY, markerKind, markerLabel);
+      beep(soundFreq, 0.045);
+      refreshUi();
+    },
+    // beep is stable enough for this purpose; it only reads refs/sim.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sim, pushTapMarker, refreshUi, setArmyPatrol],
+  );
 
   /** Shared contextual order used by right-click (mouse) and tap-with-selection (touch). */
   const issueOrder = useCallback(
@@ -535,14 +646,21 @@ export default function App() {
       const nowPinch = r.getDragMode() === "pinch";
       if (nowPinch || wasMultitouch) {
         dragStartRef.current = null;
+        shiftClickStartRef.current = null;
         selectionBoxRef.current = null;
         setSelectionBox(null);
       } else if (!touch && ev.button === 0 && !ev.shiftKey && !ev.altKey) {
         dragStartRef.current = p;
+        shiftClickStartRef.current = null;
+      } else if (!touch && ev.button === 0 && ev.shiftKey && !ev.altKey) {
+        dragStartRef.current = null;
+        shiftClickStartRef.current = p;
       } else if (touch && r.getTouchDragMode() === "select") {
         dragStartRef.current = p;
+        shiftClickStartRef.current = null;
       } else {
         dragStartRef.current = null;
+        shiftClickStartRef.current = null;
       }
       if (touch && !nowPinch && sim.getState().phase === "running") {
         const timer = window.setTimeout(() => {
@@ -552,14 +670,16 @@ export default function App() {
           selectionBoxRef.current = null;
           setSelectionBox(null);
           const world = r.screenToWorld(p.x, p.y);
-          const hit = hitTest(sim.getState(), world.x, world.y);
+          const state = sim.getState();
+          const hit = r.pickHit(state, p.x, p.y) ?? hitTest(state, world.x, world.y);
+          const targetHit = r.pickTargetAt(state, p.x, p.y) ?? hit;
           if (hit?.kind === "villager") {
             // Long-press on a peon: select it and open orders for it.
             sim.click(hit, world);
             refreshUi();
           }
           navigator.vibrate?.(12);
-          setRadial({ x: p.x, y: p.y, world, hit });
+          setRadial({ x: p.x, y: p.y, world, hit, targetHit });
         }, LONG_PRESS_MS);
         longPressRef.current = { timer, x: ev.clientX, y: ev.clientY, pointerId: ev.pointerId };
       }
@@ -610,10 +730,32 @@ export default function App() {
       const touch = isTouchLike(ev);
       const start = dragStartRef.current;
       const box = selectionBoxRef.current;
+      const shiftStart = shiftClickStartRef.current;
+      shiftClickStartRef.current = null;
       if (box && start && (touch || ev.button === 0)) {
-        const a = r.screenToWorld(box.left, box.top);
-        const b = r.screenToWorld(box.left + box.width, box.top + box.height);
-        sim.selectVillagersInRect(a, b, ev.ctrlKey || ev.metaKey);
+        const additive = ev.shiftKey || ev.ctrlKey || ev.metaKey;
+        const state = sim.getState();
+        const localTeam = sim.getLocalTeam();
+        const unitIds = r.pickFriendlyUnitsInScreenRect(
+          state,
+          localTeam,
+          box.left,
+          box.top,
+          box.left + box.width,
+          box.top + box.height,
+        );
+        if (unitIds.length > 0) {
+          // Classic AoE2 military priority over peons when box-selecting.
+          sim.selectUnitsByIds(unitIds, additive);
+        } else {
+          if (!additive) sim.clearUnitSelection();
+          const a = r.screenToWorld(box.left, box.top);
+          const b = r.screenToWorld(box.left + box.width, box.top + box.height);
+          sim.selectVillagersInRect(a, b, additive);
+        }
+        setArmyPatrol(false);
+        setPatrol(false);
+        lastUnitClickRef.current = null;
         refreshUi();
         setSelectionBox(null);
         selectionBoxRef.current = null;
@@ -624,23 +766,86 @@ export default function App() {
       setSelectionBox(null);
       selectionBoxRef.current = null;
       dragStartRef.current = null;
-      if (!tap || ev.type === "pointercancel") return;
+      const isShiftTap =
+        !tap &&
+        !touch &&
+        ev.type !== "pointercancel" &&
+        ev.button === 0 &&
+        shiftStart !== null &&
+        Math.hypot(p.x - shiftStart.x, p.y - shiftStart.y) <= TAP_SLOP_MOUSE;
+      if ((!tap && !isShiftTap) || ev.type === "pointercancel") return;
       const world = r.screenToWorld(p.x, p.y);
       const state = sim.getState();
-      const hit = hitTest(state, world.x, world.y);
+      const localTeam = sim.getLocalTeam();
+      const hit: RectHit | null = r.pickHit(state, p.x, p.y) ?? hitTest(state, world.x, world.y);
 
       if (ev.button === 2) {
+        if (!state.buildSelection && state.selectedUnitIds.length > 0) {
+          const targetHit: ScreenPickHit | null = r.pickTargetAt(state, p.x, p.y) ?? hit;
+          issueArmyOrder(world, targetHit, p.x, p.y);
+          return;
+        }
         issueOrder(world, hit, p.x, p.y);
+        return;
+      }
+
+      // Left-click / tap destination while Army Patrol mode is armed.
+      if (
+        !state.buildSelection &&
+        armyPatrolModeRef.current &&
+        state.selectedUnitIds.length > 0 &&
+        (touch || ev.button === 0)
+      ) {
+        sim.commandSelectedUnitsPatrol(world);
+        setArmyPatrol(false);
+        pushTapMarker(p.x, p.y, "patrol", "Patrol");
+        beep(390, 0.045);
+        refreshUi();
+        return;
+      }
+
+      // Left-click / tap a friendly barracks soldier → AoE2 selection (single-click selects; double-click selects all visible of same kind).
+      const clickedFriendlyUnit =
+        !state.buildSelection && hit?.kind === "unit" && (touch || ev.button === 0)
+          ? state.units.find(
+              (u) => u.id === Number(hit.id) && u.team === localTeam && u.fromBarracks && u.hp > 0,
+            )
+          : undefined;
+      if (clickedFriendlyUnit) {
+        const additive = ev.shiftKey || ev.ctrlKey || ev.metaKey;
+        const now = performance.now();
+        const prev = lastUnitClickRef.current;
+        if (prev && prev.id === clickedFriendlyUnit.id && now - prev.at <= 380) {
+          lastUnitClickRef.current = null;
+          lastUnitDblClickAtRef.current = now;
+          const ids = r.pickVisibleFriendlyUnitsOfKind(state, localTeam, clickedFriendlyUnit.kind);
+          sim.selectUnitsByIds(ids.length > 0 ? ids : [clickedFriendlyUnit.id], additive);
+          pushTapMarker(p.x, p.y, "select", "");
+          beep(460, 0.05);
+        } else {
+          lastUnitClickRef.current = { id: clickedFriendlyUnit.id, at: now };
+          sim.selectUnit(clickedFriendlyUnit.id, additive);
+          pushTapMarker(p.x, p.y, "select", "");
+          beep(360, 0.04);
+        }
+        setArmyPatrol(false);
+        setPatrol(false);
+        refreshUi();
         return;
       }
 
       if (touch && state.phase === "running") {
         const peonsSelected = state.selectedVillagerIds.length > 0;
-        const side = sim.getLocalTeam();
-        const ownPeon = hit?.kind === "villager" && state.villagers.some((v) => v.id === Number(hit.id) && v.team === side);
+        const armySelected = state.selectedUnitIds.length > 0;
+        const ownPeon = hit?.kind === "villager" && state.villagers.some((v) => v.id === Number(hit.id) && v.team === localTeam);
         const ownStructure =
-          (hit?.kind === "building" && state.buildings.some((b) => b.id === Number(hit.id) && b.team === side)) ||
-          (hit?.kind === "keep" && hit.id === side);
+          (hit?.kind === "building" && state.buildings.some((b) => b.id === Number(hit.id) && b.team === localTeam)) ||
+          (hit?.kind === "keep" && hit.id === localTeam);
+        if (!state.buildSelection && armySelected && !ownPeon && !ownStructure) {
+          const targetHit: ScreenPickHit | null = r.pickTargetAt(state, p.x, p.y) ?? hit;
+          issueArmyOrder(world, targetHit, p.x, p.y);
+          return;
+        }
         if (!state.buildSelection && peonsSelected && !ownPeon && !ownStructure) {
           // Tap-to-order: ground → move, tree/mine → gather, enemy → attack.
           issueOrder(world, hit, p.x, p.y);
@@ -648,9 +853,17 @@ export default function App() {
         }
       }
 
-      // Tap a friendly barracks troop → first person (phones included; Basilisk-style hop).
-      if (hit?.kind === "unit" && (touch || ev.button === 0) && hopIntoBody(Number(hit.id))) return;
+      // A tiny stationary Shift+click on empty ground should not accidentally clear selection.
+      if (isShiftTap && !hit) return;
 
+      lastUnitClickRef.current = null;
+      if (
+        !state.buildSelection &&
+        (!hit || hit.kind === "villager" || hit.kind === "keep" || hit.kind === "building")
+      ) {
+        sim.clearUnitSelection();
+      }
+      setArmyPatrol(false);
       sim.click(hit, world);
       if (hit?.kind === "villager") pushTapMarker(p.x, p.y, "select", "");
       refreshUi();
@@ -664,9 +877,14 @@ export default function App() {
     const onDblClick = (ev: MouseEvent) => {
       const r = rendererRef.current;
       if (!r || document.pointerLockElement === canvas) return;
+      // Do not trigger camera focus-on-ground when a friendly barracks unit was just double-clicked.
+      if (performance.now() - lastUnitDblClickAtRef.current < 160) return;
       const rect = canvas.getBoundingClientRect();
-      const world = r.screenToWorld(ev.clientX - rect.left, ev.clientY - rect.top);
-      const hit = hitTest(sim.getState(), world.x, world.y);
+      const sx = ev.clientX - rect.left;
+      const sy = ev.clientY - rect.top;
+      const world = r.screenToWorld(sx, sy);
+      const state = sim.getState();
+      const hit = r.pickHit(state, sx, sy) ?? hitTest(state, world.x, world.y);
       // Double-click empty battlefield terrain to smoothly zoom right into that spot.
       if (!hit) {
         r.focusWorld(world.x, world.y, Math.min(r.getZoomT() < 0.2 ? 120 : 190, 220));
@@ -841,6 +1059,13 @@ export default function App() {
           sim.possessRally();
           refreshUi();
         }
+        if (step === "v" && !ev.ctrlKey && !ev.metaKey && !ev.altKey && sim.getMatchMode() !== "arena") {
+          ev.preventDefault();
+          lockWantedRef.current = false;
+          sim.releasePossess("esc");
+          if (document.pointerLockElement) document.exitPointerLock();
+          refreshUi();
+        }
         return;
       }
       const slot = /^[1-9]$/.test(ev.key) ? Number(ev.key) : 0;
@@ -851,14 +1076,36 @@ export default function App() {
         groupHandled = true;
       } else if (slot > 0) {
         groupHandled = sim.useControlGroup(slot, false);
+        if (groupHandled) {
+          setArmyPatrol(false);
+          setPatrol(false);
+        }
       }
       if (!groupHandled) {
-        if (ev.key === "1") sim.selectBuild("watchtower");
-        if (ev.key === "2") sim.selectBuild("ballista");
-        if (ev.key === "3") sim.selectBuild("catapult");
-        if (ev.key === "4") sim.selectBuild("barracks");
-        if (ev.key === "5") sim.selectBuild("house");
-        if (ev.key === "6") sim.selectBuild("barricade");
+        if (ev.key === "1") {
+          setArmyPatrol(false);
+          sim.selectBuild("watchtower");
+        }
+        if (ev.key === "2") {
+          setArmyPatrol(false);
+          sim.selectBuild("ballista");
+        }
+        if (ev.key === "3") {
+          setArmyPatrol(false);
+          sim.selectBuild("catapult");
+        }
+        if (ev.key === "4") {
+          setArmyPatrol(false);
+          sim.selectBuild("barracks");
+        }
+        if (ev.key === "5") {
+          setArmyPatrol(false);
+          sim.selectBuild("house");
+        }
+        if (ev.key === "6") {
+          setArmyPatrol(false);
+          sim.selectBuild("barricade");
+        }
       }
       if (ev.code === "Space") {
         ev.preventDefault();
@@ -867,8 +1114,18 @@ export default function App() {
       if (ev.key === "Escape") {
         ev.preventDefault();
         const now = performance.now();
+        if (armyPatrolModeRef.current) {
+          setArmyPatrol(false);
+          lastEscFullscreenRef.current = 0;
+          refreshUi();
+          return;
+        }
+        if (sim.getState().selectedUnitIds.length > 0) {
+          sim.clearUnitSelection();
+        }
         sim.cancelSelection();
         setPatrol(false);
+        setArmyPatrol(false);
         setRadial(null);
         setClusterOpen(false);
         // Require a double-tap of Esc (within 650ms) in overhead view to exit fullscreen.
@@ -886,26 +1143,64 @@ export default function App() {
         ev.preventDefault();
         setClusterOpen(true);
       }
-      if ((ev.key === "p" || ev.key === "P") && sim.getState().selectedVillagerIds.length > 0) {
-        setPatrol(!patrolModeRef.current);
+      const hasArmySelection = sim.getState().selectedUnitIds.length > 0;
+      if (step === "v" && !ev.ctrlKey && !ev.metaKey && !ev.altKey && hasArmySelection) {
+        ev.preventDefault();
+        possessSelected();
+        return;
+      }
+      if (step === "p" && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+        if (hasArmySelection) {
+          const next = !armyPatrolModeRef.current;
+          setArmyPatrol(next);
+          if (next) sim.notify("Click or right-click to set army patrol route");
+        } else if (sim.getState().selectedVillagerIds.length > 0) {
+          setPatrol(!patrolModeRef.current);
+        }
+      }
+      // Army Stop: X, Backspace, or Ctrl+S (keeps plain S dedicated to smooth WASD camera panning).
+      if (
+        hasArmySelection &&
+        ((step === "x" && !ev.ctrlKey && !ev.metaKey && !ev.altKey) ||
+          (ev.key === "Backspace" && !ev.ctrlKey && !ev.metaKey && !ev.altKey) ||
+          (step === "s" && (ev.ctrlKey || ev.metaKey) && !ev.altKey))
+      ) {
+        ev.preventDefault();
+        setArmyPatrol(false);
+        sim.commandSelectedUnitsStop();
+        beep(310, 0.045);
+      }
+      if (step === "h" && !ev.ctrlKey && !ev.metaKey && !ev.altKey && hasArmySelection) {
+        setArmyPatrol(false);
+        sim.commandSelectedUnitsHold(true);
+        beep(420, 0.045);
       }
       if (ev.key === "f" || ev.key === "F") void toggleFullscreen();
       if (r) {
         if (ev.key === "=" || ev.key === "+") r.zoomBy(0.9);
         if (ev.key === "-" || ev.key === "_") r.zoomBy(1.1);
-        if (ev.key === "r" || ev.key === "R" || ev.key === "h" || ev.key === "H") r.resetCamera();
+        if (
+          ev.key === "r" ||
+          ev.key === "R" ||
+          ((ev.key === "h" || ev.key === "H") && !hasArmySelection)
+        ) {
+          r.resetCamera();
+        }
         if (ev.key === "b" || ev.key === "B") r.focusBattle(sim.getState());
         if (
-          step === "w" ||
-          step === "a" ||
-          step === "s" ||
-          step === "d" ||
-          step === "q" ||
-          step === "e" ||
-          ev.key === "ArrowLeft" ||
-          ev.key === "ArrowRight" ||
-          ev.key === "ArrowUp" ||
-          ev.key === "ArrowDown"
+          !ev.ctrlKey &&
+          !ev.metaKey &&
+          !ev.altKey &&
+          (step === "w" ||
+            step === "a" ||
+            step === "s" ||
+            step === "d" ||
+            step === "q" ||
+            step === "e" ||
+            ev.key === "ArrowLeft" ||
+            ev.key === "ArrowRight" ||
+            ev.key === "ArrowUp" ||
+            ev.key === "ArrowDown")
         ) {
           if (ev.key.startsWith("Arrow")) ev.preventDefault();
           r.setCamKey(ev.key, true);
@@ -930,7 +1225,7 @@ export default function App() {
       window.removeEventListener("keyup", onUp);
       window.removeEventListener("blur", onBlur);
     };
-  }, [sim, refreshUi, setPatrol, toggleFullscreen, skirmish.liveRef]);
+  }, [sim, refreshUi, setPatrol, setArmyPatrol, possessSelected, toggleFullscreen, skirmish.liveRef]);
 
   useEffect(() => {
     let fireHold = 0;
@@ -1011,7 +1306,15 @@ export default function App() {
           ? "Tap your keep to train peons. Two fingers: drag to pan, pinch to zoom into any spot, twist to rotate."
           : ui.pvp
             ? "Click your keep to train peons. WASD/Mid-drag pans, wheel zooms to cursor, right-drag orbits, B jumps to battle."
-            : "Click a trained soldier to take the field. WASD move, mouse look, click to strike. Kills pull the camera out. Esc returns.",
+            : "Click or box-drag trained soldiers to command them, right-click to order, or press V to take the field in first person.",
+      );
+    }
+    if (ui.selectedArmy && ui.selectedArmy.count > 0 && !(prev.selectedArmy && prev.selectedArmy.count > 0)) {
+      showHint(
+        touch ? "touch-army-order" : "mouse-army-order",
+        touch
+          ? "Tap ground to move, foe to attack, or Take Field for first person. Double-tap picks all of that type."
+          : "Right-click ground to move, ally to guard, foe/tower to focus-fire. V takes first-person command; H holds; P patrols.",
       );
     }
     if (ui.selectedPeonCount > 0 && prev.selectedPeonCount === 0) {
@@ -1048,7 +1351,14 @@ export default function App() {
     }
   }, [ui, showHint, sim, grabPointerLock]);
 
+  useEffect(() => {
+    if (armyPatrolMode && (ui.selectedArmy?.count ?? 0) === 0) {
+      setArmyPatrol(false);
+    }
+  }, [armyPatrolMode, ui.selectedArmy, setArmyPatrol]);
+
   const onSelectBuild = (kind: BuildingKind) => {
+    setArmyPatrol(false);
     sim.selectBuild(kind);
     refreshUi();
     beep(280);
@@ -1064,7 +1374,10 @@ export default function App() {
     rendererRef.current?.setQuality(setting);
   };
 
-  const sheetOpen = ui.selectedKeepTeam === ui.localTeam || Boolean(ui.selectedBuildingId && ui.selectedBuildingKind);
+  const sheetOpen =
+    ui.selectedKeepTeam === ui.localTeam ||
+    Boolean(ui.selectedBuildingId && ui.selectedBuildingKind) ||
+    Boolean(ui.selectedArmy && ui.selectedArmy.count > 0);
   const compactHud = layout.layout === "column" || layout.phone;
   const compactBuild = layout.layout === "column" && layout.phone;
   /** Arena: Commands while paused or waiting on the respawn screen (no body). */
@@ -1078,6 +1391,7 @@ export default function App() {
     setClusterOpen(false);
     setCampaignOpen(false);
     setPatrol(false);
+    setArmyPatrol(false);
     setRadial(null);
     if (skirmish.lobby.live || ui.pvp) skirmish.leave();
     else sim.reset();
@@ -1112,8 +1426,10 @@ export default function App() {
             document.exitPointerLock();
           }
         } else {
+          sim.clearUnitSelection();
           sim.cancelSelection();
           setPatrol(false);
+          setArmyPatrol(false);
           setRadial(null);
         }
         setClusterOpen(false);
@@ -1152,9 +1468,17 @@ export default function App() {
       hint: layout.touch
         ? "Then tap a destination. They walk the route and fight nearby."
         : "Then right-click a destination (P). They walk the route and fight nearby.",
-      disabled: ui.selectedPeonCount === 0,
-      active: patrolMode,
-      onPress: () => setPatrol(!patrolModeRef.current),
+      disabled: ui.selectedPeonCount === 0 && (ui.selectedArmy?.count ?? 0) === 0,
+      active: (ui.selectedArmy?.count ?? 0) > 0 ? armyPatrolMode : patrolMode,
+      onPress: () => {
+        if (sim.getState().selectedUnitIds.length > 0) {
+          const next = !armyPatrolModeRef.current;
+          setArmyPatrol(next);
+          if (next) sim.notify("Click or right-click to set army patrol route");
+        } else {
+          setPatrol(!patrolModeRef.current);
+        }
+      },
     },
     {
       id: "barricade",
@@ -1237,9 +1561,67 @@ export default function App() {
   const radialItems: RadialItem[] = [];
   if (radial) {
     const state = sim.getState();
+    const localTeam = sim.getLocalTeam();
     const peons = state.selectedVillagerIds.length > 0;
-    const { world, hit, x, y } = radial;
-    if (peons) {
+    const army = state.selectedUnitIds.length > 0;
+    const { world, hit, targetHit, x, y } = radial;
+    if (army) {
+      radialItems.push({
+        id: "move",
+        icon: "➤",
+        label: "Move",
+        tone: "move",
+        onPress: () => {
+          setArmyPatrol(false);
+          issueArmyOrder(world, null, x, y);
+        },
+      });
+      radialItems.push({
+        id: "patrol",
+        icon: "⇄",
+        label: "Patrol",
+        tone: "patrol",
+        onPress: () => {
+          setArmyPatrol(true);
+          issueArmyOrder(world, null, x, y);
+        },
+      });
+      if (
+        targetHit?.kind === "unit" &&
+        state.units.some((u) => u.id === Number(targetHit.id) && u.team === localTeam && u.hp > 0)
+      ) {
+        radialItems.push({
+          id: "guard",
+          icon: "🛡",
+          label: "Guard",
+          tone: "patrol",
+          onPress: () => {
+            setArmyPatrol(false);
+            issueArmyOrder(world, targetHit, x, y);
+          },
+        });
+      }
+      const isEnemyTarget =
+        (targetHit?.kind === "unit" &&
+          state.units.some((u) => u.id === Number(targetHit.id) && u.team !== localTeam && u.hp > 0)) ||
+        (targetHit?.kind === "building" &&
+          state.buildings.some((b) => b.id === Number(targetHit.id) && b.team !== localTeam && b.hp > 0)) ||
+        (targetHit?.kind === "barricade" &&
+          state.barricades.some((b) => b.id === Number(targetHit.id) && b.team !== localTeam && b.hp > 0)) ||
+        (targetHit?.kind === "keep" && targetHit.id !== localTeam);
+      if (isEnemyTarget) {
+        radialItems.push({
+          id: "attack",
+          icon: "⚔",
+          label: "Attack",
+          tone: "attack",
+          onPress: () => {
+            setArmyPatrol(false);
+            issueArmyOrder(world, targetHit, x, y);
+          },
+        });
+      }
+    } else if (peons) {
       radialItems.push({
         id: "move",
         icon: "➤",
@@ -1566,6 +1948,11 @@ export default function App() {
               Patrol: {layout.touch ? "tap" : "right-click"} the destination
             </div>
           )}
+          {armyPatrolMode && (ui.selectedArmy?.count ?? 0) > 0 && (
+            <div className="mode-banner" role="status">
+              Army Patrol: {layout.touch ? "tap" : "click or right-click"} the destination
+            </div>
+          )}
           {hint && (
             <button type="button" className="hint-toast" onClick={dismissHint} aria-live="polite">
               {hint.text}
@@ -1649,7 +2036,10 @@ export default function App() {
             <DetailSheet
             ui={ui}
             onClose={() => {
+              sim.clearUnitSelection();
               sim.cancelSelection();
+              setArmyPatrol(false);
+              setPatrol(false);
               refreshUi();
             }}
             onUpgradeDamage={() => {
@@ -1697,6 +2087,40 @@ export default function App() {
               sim.ungarrisonVillagers(sim.getLocalTeam());
               refreshUi();
               beep(260);
+            }}
+            armyPatrolMode={armyPatrolMode}
+            onPossessSelected={() => {
+              possessSelected();
+            }}
+            onToggleArmyHold={() => {
+              setArmyPatrol(false);
+              sim.commandSelectedUnitsHold(true);
+              refreshUi();
+              beep(420, 0.045);
+            }}
+            onStartArmyPatrol={() => {
+              const next = !armyPatrolModeRef.current;
+              setArmyPatrol(next);
+              if (next) sim.notify("Click or right-click to set army patrol route");
+              refreshUi();
+            }}
+            onStopArmy={() => {
+              setArmyPatrol(false);
+              sim.commandSelectedUnitsStop();
+              refreshUi();
+              beep(310, 0.045);
+            }}
+            onReleaseArmy={() => {
+              setArmyPatrol(false);
+              sim.commandSelectedUnitsRelease();
+              refreshUi();
+              beep(340, 0.045);
+            }}
+            onFilterArmyKind={(kind) => {
+              setArmyPatrol(false);
+              sim.filterSelectedUnitsByKind(kind);
+              refreshUi();
+              beep(380, 0.04);
             }}
           />
             )}

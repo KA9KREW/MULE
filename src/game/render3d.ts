@@ -19,7 +19,7 @@ import { homeCameraFrame } from "./homeCamera";
 import { mapBounds } from "./map";
 import { cloneModel, ensureModelsLoaded, setSharedAnisotropy } from "./assets3d";
 import { buildSkyEnvironment } from "./skyEnvironment";
-import type { Barricade, Building, GameState, Team, Unit } from "./types";
+import type { Barricade, Building, CommandMarker, GameState, RectHit, Team, Unit, UnitKind } from "./types";
 import {
   buildScenery,
   buildTerrain,
@@ -121,6 +121,27 @@ export function detectQualityTier(): QualityTier {
 }
 
 const MAX_COMMAND_LINES = 64;
+const MAX_GUARD_TETHERS = 96;
+
+/** Unified 3D screen-space pick result (extends RectHit with barricades). */
+export type ScreenPickHit = RectHit | { kind: "barricade"; id: string };
+
+/** Tactical ring base radius matched to each unit's 3D footprint. */
+function unitFootprintRadius(kind: UnitKind): number {
+  switch (kind) {
+    case "trebuchet":
+      return 16.5;
+    case "rammer":
+      return 13.5;
+    case "brute":
+    case "templar":
+      return 9.8;
+    case "ward":
+      return 9.2;
+    default:
+      return 7.4;
+  }
+}
 
 /**
  * Three.js battlefield renderer â€” same public API as the old Canvas2D GameRenderer.
@@ -137,6 +158,7 @@ export class GameRenderer {
   private staticRoot = new THREE.Group();
   private dynamicRoot = new THREE.Group();
   private commandLineRoot = new THREE.Group();
+  private tacticalRingRoot = new THREE.Group();
   private floatRoot = new THREE.Group();
 
   private entityMap = new Map<EntityKey, THREE.Object3D>();
@@ -155,12 +177,35 @@ export class GameRenderer {
   private scratchLive = new Set<string>();
   private scratchIds = new Set<number>();
   private scratchPads = new Set<string>();
+  private scratchSelectedUnitIds = new Set<number>();
+  private scratchGuardedIds = new Set<number>();
+  private scratchTargetKeys = new Set<string>();
+  private scratchUnitById = new Map<number, Unit>();
   // Pooled command-line visuals (updated in place, never re-created per frame)
   private commandLines: THREE.LineSegments;
   private commandLinePos: Float32Array;
   private commandLineCol: Float32Array;
   private rallyLine: THREE.Line;
   private rallyLinePos: Float32Array;
+  // Pooled AoE2 tactical visuals: barracks selection rings, emerald guard rings/tethers, crimson target rings
+  private guardTetherLines: THREE.LineSegments;
+  private guardLinePos: Float32Array;
+  private guardLineDist: Float32Array;
+  private unitRingGlowGeo: THREE.RingGeometry;
+  private unitRingCoreGeo: THREE.RingGeometry;
+  private unitSelGlowMat: THREE.MeshBasicMaterial;
+  private unitSelCoreMat: THREE.MeshBasicMaterial;
+  private guardRingGlowMat: THREE.MeshBasicMaterial;
+  private guardRingCoreMat: THREE.MeshBasicMaterial;
+  private targetRingGlowMat: THREE.MeshBasicMaterial;
+  private targetRingCoreMat: THREE.MeshBasicMaterial;
+  private unitSelRingPool: THREE.Group[] = [];
+  private guardRingPool: THREE.Group[] = [];
+  private targetRingPool: THREE.Group[] = [];
+  // Shared command marker geometries (prevent per-marker geometry leaks)
+  private cmdRingGeo: THREE.RingGeometry;
+  private cmdGuardOuterGeo: THREE.RingGeometry;
+  private cmdGuardShieldGeo: THREE.RingGeometry;
   private padMaterials = new Map<string, THREE.MeshBasicMaterial>();
   private rangeRingFor = "";
   private dogRangeRing: THREE.Mesh | null = null;
@@ -179,6 +224,10 @@ export class GameRenderer {
   private pinchStartAngle = 0;
   private pinchCenter = { x: 0, y: 0 };
   private tmpV = new THREE.Vector3();
+  private pickV0 = new THREE.Vector3();
+  private pickV1 = new THREE.Vector3();
+  private pickRayPt = new THREE.Vector3();
+  private pickSegPt = new THREE.Vector3();
   private lastMapId = "";
   /** Gun-game courtyard — frame the yard, hide keeps. */
   private arenaView = false;
@@ -313,6 +362,7 @@ export class GameRenderer {
     this.staticRoot.add(this.worldGroup);
     this.root.add(this.dynamicRoot);
     this.dynamicRoot.add(this.commandLineRoot);
+    this.dynamicRoot.add(this.tacticalRingRoot);
     this.root.add(this.floatRoot);
 
     this.particleMat = new THREE.PointsMaterial({
@@ -350,6 +400,105 @@ export class GameRenderer {
     this.rallyLine.visible = false;
     this.commandLineRoot.add(this.rallyLine);
 
+    // Pooled emerald guard tether lines (dashed green, updated in place with pre-allocated lineDistance).
+    this.guardLinePos = new Float32Array(MAX_GUARD_TETHERS * 2 * 3);
+    this.guardLineDist = new Float32Array(MAX_GUARD_TETHERS * 2);
+    const guardLineGeo = new THREE.BufferGeometry();
+    guardLineGeo.setAttribute("position", new THREE.BufferAttribute(this.guardLinePos, 3).setUsage(THREE.DynamicDrawUsage));
+    guardLineGeo.setAttribute(
+      "lineDistance",
+      new THREE.BufferAttribute(this.guardLineDist, 1).setUsage(THREE.DynamicDrawUsage),
+    );
+    guardLineGeo.setDrawRange(0, 0);
+    this.guardTetherLines = new THREE.LineSegments(
+      guardLineGeo,
+      new THREE.LineDashedMaterial({
+        color: 0x3ef59c,
+        dashSize: 4.5,
+        gapSize: 3.5,
+        transparent: true,
+        opacity: 0.82,
+        depthTest: false,
+        depthWrite: false,
+        toneMapped: false,
+      }),
+    );
+    this.guardTetherLines.frustumCulled = false;
+    this.guardTetherLines.visible = false;
+    this.guardTetherLines.renderOrder = 22;
+    this.commandLineRoot.add(this.guardTetherLines);
+
+    // Shared normalized-radius ring geometries & materials for AoE2 unit selection / guard / focus-target rings.
+    this.unitRingGlowGeo = new THREE.RingGeometry(0.72, 1.15, 36);
+    this.unitRingGlowGeo.rotateX(-Math.PI / 2);
+    this.unitRingCoreGeo = new THREE.RingGeometry(0.84, 1.0, 36);
+    this.unitRingCoreGeo.rotateX(-Math.PI / 2);
+
+    this.unitSelGlowMat = new THREE.MeshBasicMaterial({
+      color: 0x26ecff,
+      transparent: true,
+      opacity: 0.4,
+      side: THREE.DoubleSide,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    this.unitSelCoreMat = new THREE.MeshBasicMaterial({
+      color: 0xffe45e,
+      transparent: true,
+      opacity: 0.96,
+      side: THREE.DoubleSide,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+
+    this.guardRingGlowMat = new THREE.MeshBasicMaterial({
+      color: 0x12c970,
+      transparent: true,
+      opacity: 0.34,
+      side: THREE.DoubleSide,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    this.guardRingCoreMat = new THREE.MeshBasicMaterial({
+      color: 0x3ef59c,
+      transparent: true,
+      opacity: 0.92,
+      side: THREE.DoubleSide,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+
+    this.targetRingGlowMat = new THREE.MeshBasicMaterial({
+      color: 0xff1e2d,
+      transparent: true,
+      opacity: 0.36,
+      side: THREE.DoubleSide,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    this.targetRingCoreMat = new THREE.MeshBasicMaterial({
+      color: 0xff4550,
+      transparent: true,
+      opacity: 0.95,
+      side: THREE.DoubleSide,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+
+    // Shared geometries for command markers (material disposed cleanly on prune).
+    this.cmdRingGeo = new THREE.RingGeometry(3.5, 5.0, 24);
+    this.cmdRingGeo.rotateX(-Math.PI / 2);
+    this.cmdGuardOuterGeo = new THREE.RingGeometry(3.8, 5.4, 32);
+    this.cmdGuardOuterGeo.rotateX(-Math.PI / 2);
+    this.cmdGuardShieldGeo = new THREE.RingGeometry(1.9, 3.1, 6);
+    this.cmdGuardShieldGeo.rotateX(-Math.PI / 2);
+
     this.buildSky();
     this.buildFpsRig();
     this.fitCamera();
@@ -357,6 +506,21 @@ export class GameRenderer {
     void ensureModelsLoaded().then(() => {
       // Force one remesh pass so trees and props pick up loaded models.
       this.lastMapId = "";
+    });
+  }
+
+  private hideTacticalOverlays() {
+    for (const r of this.unitSelRingPool) r.visible = false;
+    for (const r of this.guardRingPool) r.visible = false;
+    for (const r of this.targetRingPool) r.visible = false;
+    this.guardTetherLines.geometry.setDrawRange(0, 0);
+    this.guardTetherLines.visible = false;
+  }
+
+  private disposeCommandMarkerObject(obj: THREE.Object3D) {
+    obj.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (mesh.material instanceof THREE.Material) mesh.material.dispose();
     });
   }
 
@@ -368,8 +532,10 @@ export class GameRenderer {
     this.particles.length = 0;
     this.rangeRingFor = "";
     this.disposeRangeRings();
+    this.hideTacticalOverlays();
     for (const [k, obj] of [...this.entityMap]) {
       this.dynamicRoot.remove(obj);
+      if (k.startsWith("cmd-")) this.disposeCommandMarkerObject(obj);
       this.clearAnimation(k);
       this.entityMap.delete(k);
     }
@@ -1315,6 +1481,319 @@ export class GameRenderer {
     };
   }
 
+  /** Project a 2D sim world point (at elevation `height`) into canvas-local CSS pixels, or null if behind camera. */
+  private projectWorldPoint(
+    worldX: number,
+    worldY: number,
+    height: number,
+    width: number,
+    heightPx: number,
+    out: { x: number; y: number },
+  ): boolean {
+    const v = this.tmpV;
+    v.set(worldX - WORLD_W / 2, height, worldY - WORLD_H / 2);
+    v.applyMatrix4(this.camera.matrixWorldInverse);
+    if (v.z >= -this.camera.near || v.z <= -this.camera.far) return false;
+    v.applyMatrix4(this.camera.projectionMatrix);
+    if (v.z < -1 || v.z > 1) return false;
+    out.x = (v.x * 0.5 + 0.5) * width;
+    out.y = (-v.y * 0.5 + 0.5) * heightPx;
+    return true;
+  }
+
+  /** Project a sim world coordinate to canvas-local screen coordinates, or null if behind the camera. */
+  worldToScreen(worldX: number, worldY: number, height = 0): { x: number; y: number } | null {
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return null;
+    this.camera.updateMatrixWorld();
+    const out = { x: 0, y: 0 };
+    return this.projectWorldPoint(worldX, worldY, height, rect.width, rect.height, out) ? out : null;
+  }
+
+  /**
+   * Project every living friendly `fromBarracks` unit to canvas coordinates and return IDs
+   * falling inside the screen rectangle `[min(x0,x1), max(x0,x1)] × [min(y0,y1), max(y0,y1)]`.
+   */
+  pickFriendlyUnitsInScreenRect(
+    state: GameState,
+    team: Team,
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+  ): number[] {
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return [];
+    this.camera.updateMatrixWorld();
+    const minX = Math.min(x0, x1);
+    const maxX = Math.max(x0, x1);
+    const minY = Math.min(y0, y1);
+    const maxY = Math.max(y0, y1);
+    const pt = { x: 0, y: 0 };
+    const ids: number[] = [];
+
+    for (const u of state.units) {
+      if (u.team !== team || !u.fromBarracks || u.hp <= 0) continue;
+      const bodyH = u.kind === "trebuchet" || u.kind === "rammer" ? 7 : 4.5;
+      if (
+        this.projectWorldPoint(u.pos.x, u.pos.y, bodyH, rect.width, rect.height, pt) &&
+        pt.x >= minX &&
+        pt.x <= maxX &&
+        pt.y >= minY &&
+        pt.y <= maxY
+      ) {
+        ids.push(u.id);
+        continue;
+      }
+      if (
+        this.projectWorldPoint(u.pos.x, u.pos.y, 0.5, rect.width, rect.height, pt) &&
+        pt.x >= minX &&
+        pt.x <= maxX &&
+        pt.y >= minY &&
+        pt.y <= maxY
+      ) {
+        ids.push(u.id);
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * Return IDs of all living friendly `fromBarracks` units of `kind` currently visible inside
+   * the camera viewport `[0..width, 0..height]` (AoE2 double-click selection).
+   */
+  pickVisibleFriendlyUnitsOfKind(state: GameState, team: Team, kind: UnitKind): number[] {
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return [];
+    this.camera.updateMatrixWorld();
+    const pt = { x: 0, y: 0 };
+    const ids: number[] = [];
+
+    for (const u of state.units) {
+      if (u.team !== team || !u.fromBarracks || u.hp <= 0 || u.kind !== kind) continue;
+      const bodyH = u.kind === "trebuchet" || u.kind === "rammer" ? 7 : 4.5;
+      if (
+        (this.projectWorldPoint(u.pos.x, u.pos.y, bodyH, rect.width, rect.height, pt) ||
+          this.projectWorldPoint(u.pos.x, u.pos.y, 0.5, rect.width, rect.height, pt)) &&
+        pt.x >= 0 &&
+        pt.x <= rect.width &&
+        pt.y >= 0 &&
+        pt.y <= rect.height
+      ) {
+        ids.push(u.id);
+      }
+    }
+    return ids;
+  }
+
+  private segmentRayScore(
+    x0: number,
+    y0: number,
+    z0: number,
+    x1: number,
+    y1: number,
+    z1: number,
+    baseRadius: number,
+    minScreenScale: number,
+  ): number | null {
+    const ray = this.raycaster.ray;
+    this.pickV0.set(x0, y0, z0);
+    this.pickV1.set(x1, y1, z1);
+    const distSq = ray.distanceSqToSegment(this.pickV0, this.pickV1, this.pickRayPt, this.pickSegPt);
+    const camDist = this.pickRayPt.distanceTo(ray.origin);
+    if (camDist < this.camera.near) return null;
+    const effR = Math.max(baseRadius, camDist * minScreenScale);
+    if (distSq > effR * effR) return null;
+    return Math.sqrt(distSq) / effR + camDist * 1e-5;
+  }
+
+  private setupPickRay(screenX: number, screenY: number): boolean {
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return false;
+    this.camera.updateMatrixWorld();
+    this.pointer.x = (screenX / rect.width) * 2 - 1;
+    this.pointer.y = -(screenY / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    return true;
+  }
+
+  /** Accurate 3D screen-space picking for living barricades (returns barricade id or null). */
+  pickBarricade(state: GameState, screenX: number, screenY: number): number | null {
+    if (!this.setupPickRay(screenX, screenY)) return null;
+    const hw = WORLD_W / 2;
+    const hh = WORLD_H / 2;
+    let bestId: number | null = null;
+    let bestScore = Infinity;
+    for (const bar of state.barricades) {
+      if (bar.hp <= 0) continue;
+      const wx = bar.pos.x - hw;
+      const wz = bar.pos.y - hh;
+      const score = this.segmentRayScore(wx - 19, 5.5, wz, wx + 19, 5.5, wz, 9.5, 0.015);
+      if (score != null && score < bestScore) {
+        bestScore = score;
+        bestId = bar.id;
+      }
+    }
+    return bestId;
+  }
+
+  private pickEntities(state: GameState, screenX: number, screenY: number, includeBarricades: false): RectHit | null;
+  private pickEntities(state: GameState, screenX: number, screenY: number, includeBarricades: true): ScreenPickHit | null;
+  private pickEntities(
+    state: GameState,
+    screenX: number,
+    screenY: number,
+    includeBarricades: boolean,
+  ): ScreenPickHit | null {
+    if (!this.setupPickRay(screenX, screenY)) return null;
+    const hw = WORLD_W / 2;
+    const hh = WORLD_H / 2;
+    const hasGround = this.raycaster.ray.intersectPlane(this.groundPlane, this.tmpV) !== null;
+    const gx = this.tmpV.x + hw;
+    const gy = this.tmpV.z + hh;
+
+    // 1. Living units & non-garrisoned villagers (3D capsule test so clicking upper bodies hits accurately).
+    let bestMobile: RectHit | null = null;
+    let bestMobileScore = Infinity;
+    for (const v of state.villagers) {
+      if (v.hp <= 0 || v.state === "garrisoned") continue;
+      const wx = v.pos.x - hw;
+      const wz = v.pos.y - hh;
+      const score = this.segmentRayScore(wx, 0, wz, wx, 10, wz, 7.8, 0.014);
+      if (score != null && score < bestMobileScore) {
+        bestMobileScore = score;
+        bestMobile = { kind: "villager", id: String(v.id) };
+      }
+    }
+    for (const u of state.units) {
+      if (u.hp <= 0) continue;
+      const wx = u.pos.x - hw;
+      const wz = u.pos.y - hh;
+      const topY = u.kind === "trebuchet" ? 18 : u.kind === "rammer" ? 10 : u.kind === "runner" || u.kind === "templar" ? 13.5 : 11;
+      const rad =
+        u.kind === "trebuchet"
+          ? 18
+          : u.kind === "rammer"
+            ? 14
+            : u.kind === "brute" || u.kind === "templar" || u.kind === "ward"
+              ? 10
+              : 8;
+      const score = this.segmentRayScore(wx, 0, wz, wx, topY, wz, rad, 0.014);
+      if (score != null && score < bestMobileScore) {
+        bestMobileScore = score;
+        bestMobile = { kind: "unit", id: String(u.id) };
+      }
+    }
+    if (bestMobile) return bestMobile;
+
+    // 2. Barricades (horizontal beam test across road).
+    if (includeBarricades) {
+      let bestBar: ScreenPickHit | null = null;
+      let bestBarScore = Infinity;
+      for (const bar of state.barricades) {
+        if (bar.hp <= 0) continue;
+        const wx = bar.pos.x - hw;
+        const wz = bar.pos.y - hh;
+        const score = this.segmentRayScore(wx - 19, 5.5, wz, wx + 19, 5.5, wz, 9.5, 0.015);
+        if (score != null && score < bestBarScore) {
+          bestBarScore = score;
+          bestBar = { kind: "barricade", id: String(bar.id) };
+        }
+      }
+      if (bestBar) return bestBar;
+    }
+
+    // 3. Buildings (friendly & enemy).
+    let bestBld: RectHit | null = null;
+    let bestBldScore = Infinity;
+    for (const b of state.buildings) {
+      if (b.hp <= 0) continue;
+      const wx = b.pos.x - hw;
+      const wz = b.pos.y - hh;
+      const topY = b.kind === "watchtower" || b.kind === "church" ? 28 : 20;
+      let score = this.segmentRayScore(wx, 0, wz, wx, topY, wz, 21, 0.016);
+      if (score == null && hasGround) {
+        const d = Math.hypot(gx - b.pos.x, gy - b.pos.y);
+        if (d < 26) score = d / 26 + 0.5;
+      }
+      if (score != null && score < bestBldScore) {
+        bestBldScore = score;
+        bestBld = { kind: "building", id: String(b.id) };
+      }
+    }
+    if (bestBld) return bestBld;
+
+    // 4. Resource nodes (wins over overlapping pads).
+    let bestNode: RectHit | null = null;
+    let bestNodeScore = Infinity;
+    for (const n of state.nodes) {
+      const wx = n.pos.x - hw;
+      const wz = n.pos.y - hh;
+      let score = this.segmentRayScore(wx, 0, wz, wx, 22, wz, 24, 0.016);
+      if (score == null && hasGround) {
+        const d = Math.hypot(gx - n.pos.x, gy - n.pos.y);
+        if (d < 34) score = d / 34 + 0.5;
+      }
+      if (score != null && score < bestNodeScore) {
+        bestNodeScore = score;
+        bestNode = { kind: "node", id: n.id };
+      }
+    }
+    if (bestNode) return bestNode;
+
+    // 5. Unoccupied build pads.
+    if (hasGround) {
+      const occupied = this.scratchPads;
+      occupied.clear();
+      for (const b of state.buildings) if (b.padId) occupied.add(b.padId);
+      let bestPad: RectHit | null = null;
+      let bestPadDist = 26;
+      for (const p of state.pads) {
+        if (occupied.has(p.id)) continue;
+        const d = Math.hypot(gx - p.pos.x, gy - p.pos.y);
+        if (d < bestPadDist) {
+          bestPadDist = d;
+          bestPad = { kind: "pad", id: p.id };
+        }
+      }
+      if (bestPad) return bestPad;
+    }
+
+    // 6. Keeps (skipped during Arena courtyard mode).
+    if (!state.arena) {
+      let bestKeep: RectHit | null = null;
+      let bestKeepScore = Infinity;
+      for (const team of ["you", "foe"] as Team[]) {
+        const k = state.keeps[team];
+        if (k.hp <= 0) continue;
+        const wx = k.pos.x - hw;
+        const wz = k.pos.y - hh;
+        let score = this.segmentRayScore(wx, 0, wz, wx, 34, wz, 34, 0.02);
+        if (score == null && hasGround) {
+          const d = Math.hypot(gx - k.pos.x, gy - k.pos.y);
+          if (d < 40) score = d / 40 + 0.5;
+        }
+        if (score != null && score < bestKeepScore) {
+          bestKeepScore = score;
+          bestKeep = { kind: "keep", id: team };
+        }
+      }
+      if (bestKeep) return bestKeep;
+    }
+
+    return null;
+  }
+
+  /** Accurate 3D screen-space entity picking for clicks/orders (returns `RectHit | null`). */
+  pickHit(state: GameState, screenX: number, screenY: number): RectHit | null {
+    return this.pickEntities(state, screenX, screenY, false);
+  }
+
+  /** Accurate 3D screen-space entity picking including barricades (`RectHit | { kind: "barricade"; id: string } | null`). */
+  pickTargetAt(state: GameState, screenX: number, screenY: number): ScreenPickHit | null {
+    return this.pickEntities(state, screenX, screenY, true);
+  }
+
   draw(state: GameState) {
     const now = performance.now();
     const rawMs = now - this.wallClock;
@@ -1349,6 +1828,7 @@ export class GameRenderer {
     this.syncNodes(state);
     this.syncBarricades(state);
     this.syncUnits(state);
+    this.syncUnitTacticalViz(state);
     this.syncVillagers(state);
     this.syncCommandViz(state);
     this.updateAnimations(step);
@@ -1438,6 +1918,7 @@ export class GameRenderer {
       if (!k.startsWith(prefix)) continue;
       if (!live.has(k)) {
         this.dynamicRoot.remove(obj);
+        if (prefix === "cmd-") this.disposeCommandMarkerObject(obj);
         this.clearAnimation(k);
         this.entityMap.delete(k);
       }
@@ -2034,6 +2515,215 @@ export class GameRenderer {
     this.prune("vil-", live);
   }
 
+  private obtainPooledRing(
+    pool: THREE.Group[],
+    glowMat: THREE.MeshBasicMaterial,
+    coreMat: THREE.MeshBasicMaterial,
+    glowOrder: number,
+    coreOrder: number,
+    idx: number,
+  ): THREE.Group {
+    if (idx < pool.length) return pool[idx]!;
+    const g = new THREE.Group();
+    const glow = new THREE.Mesh(this.unitRingGlowGeo, glowMat);
+    glow.renderOrder = glowOrder;
+    const core = new THREE.Mesh(this.unitRingCoreGeo, coreMat);
+    core.position.y = 0.04;
+    core.renderOrder = coreOrder;
+    g.add(glow, core);
+    this.tacticalRingRoot.add(g);
+    pool.push(g);
+    return g;
+  }
+
+  private finalizeRingPool(pool: THREE.Group[], usedCount: number) {
+    for (let i = usedCount; i < pool.length; i++) {
+      pool[i]!.visible = false;
+    }
+    const maxKeep = Math.max(24, usedCount * 2);
+    while (pool.length > maxKeep) {
+      const extra = pool.pop()!;
+      this.tacticalRingRoot.remove(extra);
+    }
+  }
+
+  /**
+   * AoE2-style tactical unit visuals (all pooled, zero per-frame geometry/material allocation):
+   * 1) Gold/cyan selection rings under units in `state.selectedUnitIds`
+   * 2) Pulsing emerald guard rings + dashed green tethers to guarded allies
+   * 3) Pulsing crimson target rings under focused enemy units, buildings, barricades, or keep
+   */
+  private syncUnitTacticalViz(state: GameState) {
+    const selectedIds = state.selectedUnitIds;
+    if (!selectedIds || selectedIds.length === 0) {
+      this.finalizeRingPool(this.unitSelRingPool, 0);
+      this.finalizeRingPool(this.guardRingPool, 0);
+      this.finalizeRingPool(this.targetRingPool, 0);
+      this.guardTetherLines.geometry.setDrawRange(0, 0);
+      this.guardTetherLines.visible = false;
+      return;
+    }
+
+    const selSet = this.scratchSelectedUnitIds;
+    selSet.clear();
+    for (const id of selectedIds) selSet.add(id);
+
+    const unitById = this.scratchUnitById;
+    unitById.clear();
+    for (const u of state.units) {
+      if (u.hp > 0) unitById.set(u.id, u);
+    }
+
+    const guardedIds = this.scratchGuardedIds;
+    guardedIds.clear();
+    const targetKeys = this.scratchTargetKeys;
+    targetKeys.clear();
+
+    const hw = WORLD_W / 2;
+    const hh = WORLD_H / 2;
+    const guardWave = Math.sin(state.time * 5.2);
+    const targetWave = Math.sin(state.time * 7.2);
+    const guardPulse = 1 + guardWave * 0.07;
+    const targetPulse = 1 + targetWave * 0.08;
+    this.guardRingCoreMat.opacity = 0.78 + guardWave * 0.16;
+    this.guardRingGlowMat.opacity = 0.24 + guardWave * 0.1;
+    this.targetRingCoreMat.opacity = 0.82 + targetWave * 0.14;
+    this.targetRingGlowMat.opacity = 0.26 + targetWave * 0.1;
+
+    let selCount = 0;
+    let guardCount = 0;
+    let targetCount = 0;
+    let tetherCount = 0;
+    const linePos = this.guardLinePos;
+    const lineDist = this.guardLineDist;
+
+    const placeTargetRing = (key: string, x: number, y: number, elev: number, radius: number) => {
+      if (targetKeys.has(key)) return;
+      targetKeys.add(key);
+      const tRing = this.obtainPooledRing(
+        this.targetRingPool,
+        this.targetRingGlowMat,
+        this.targetRingCoreMat,
+        25,
+        26,
+        targetCount++,
+      );
+      tRing.visible = true;
+      setPos3(tRing, x, y, elev);
+      tRing.scale.setScalar(radius * targetPulse);
+    };
+
+    for (const u of state.units) {
+      if (u.hp <= 0 || !selSet.has(u.id)) continue;
+
+      // 1. Selected barracks unit ring
+      const selRing = this.obtainPooledRing(
+        this.unitSelRingPool,
+        this.unitSelGlowMat,
+        this.unitSelCoreMat,
+        20,
+        21,
+        selCount++,
+      );
+      selRing.visible = true;
+      setPos3(selRing, u.pos.x, u.pos.y, 0.8);
+      selRing.scale.setScalar(unitFootprintRadius(u.kind));
+
+      // 2. Guard ring + dashed emerald tether
+      if (u.guardUnitId != null) {
+        const allyUnit = unitById.get(u.guardUnitId);
+        let guardPos: { x: number; y: number } | null = null;
+        let guardKeyId = -1;
+        let guardRadius = 7.4;
+
+        if (allyUnit && allyUnit.team === u.team && allyUnit.id !== u.id) {
+          guardPos = allyUnit.pos;
+          guardKeyId = allyUnit.id;
+          guardRadius = unitFootprintRadius(allyUnit.kind);
+        } else {
+          const allyVil = state.villagers.find(
+            (v) => v.id === u.guardUnitId && v.hp > 0 && v.state !== "garrisoned" && v.team === u.team,
+          );
+          if (allyVil) {
+            guardPos = allyVil.pos;
+            guardKeyId = -allyVil.id - 1;
+            guardRadius = 7.4;
+          }
+        }
+
+        if (guardPos) {
+          if (!guardedIds.has(guardKeyId)) {
+            guardedIds.add(guardKeyId);
+            const gRing = this.obtainPooledRing(
+              this.guardRingPool,
+              this.guardRingGlowMat,
+              this.guardRingCoreMat,
+              23,
+              24,
+              guardCount++,
+            );
+            gRing.visible = true;
+            setPos3(gRing, guardPos.x, guardPos.y, 0.75);
+            gRing.scale.setScalar(guardRadius * 1.22 * guardPulse);
+          }
+          if (tetherCount < MAX_GUARD_TETHERS) {
+            const segLen = Math.hypot(guardPos.x - u.pos.x, guardPos.y - u.pos.y);
+            if (segLen > 2) {
+              const o = tetherCount * 6;
+              linePos[o] = u.pos.x - hw;
+              linePos[o + 1] = 1.4;
+              linePos[o + 2] = u.pos.y - hh;
+              linePos[o + 3] = guardPos.x - hw;
+              linePos[o + 4] = 1.4;
+              linePos[o + 5] = guardPos.y - hh;
+              lineDist[tetherCount * 2] = 0;
+              lineDist[tetherCount * 2 + 1] = segLen;
+              tetherCount++;
+            }
+          }
+        }
+      }
+
+      // 3. Focus-attack crimson target rings
+      if (u.orderTargetUnitId != null) {
+        const enemy = unitById.get(u.orderTargetUnitId);
+        if (enemy) {
+          placeTargetRing(`u-${enemy.id}`, enemy.pos.x, enemy.pos.y, 0.82, unitFootprintRadius(enemy.kind) * 1.2);
+        }
+      }
+      if (u.orderTargetBuildingId != null) {
+        const bld = state.buildings.find((b) => b.id === u.orderTargetBuildingId && b.hp > 0);
+        if (bld) {
+          placeTargetRing(`b-${bld.id}`, bld.pos.x, bld.pos.y, 0.88, 21);
+        }
+      }
+      if (u.orderTargetBarricadeId != null) {
+        const bar = state.barricades.find((b) => b.id === u.orderTargetBarricadeId && b.hp > 0);
+        if (bar) {
+          placeTargetRing(`bar-${bar.id}`, bar.pos.x, bar.pos.y, 0.88, 17.5);
+        }
+      }
+      if (u.orderTargetKeep && !state.arena) {
+        const enemyTeam: Team = u.team === "you" ? "foe" : "you";
+        const keep = state.keeps[enemyTeam];
+        if (keep && keep.hp > 0) {
+          placeTargetRing(`k-${enemyTeam}`, keep.pos.x, keep.pos.y, 0.92, 34);
+        }
+      }
+    }
+
+    this.finalizeRingPool(this.unitSelRingPool, selCount);
+    this.finalizeRingPool(this.guardRingPool, guardCount);
+    this.finalizeRingPool(this.targetRingPool, targetCount);
+
+    this.guardTetherLines.geometry.setDrawRange(0, tetherCount * 2);
+    this.guardTetherLines.visible = tetherCount > 0;
+    if (tetherCount > 0) {
+      (this.guardTetherLines.geometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+      (this.guardTetherLines.geometry.getAttribute("lineDistance") as THREE.BufferAttribute).needsUpdate = true;
+    }
+  }
+
   private syncCommandViz(state: GameState) {
     // Peon order lines → pooled LineSegments, written in place.
     const pos = this.commandLinePos;
@@ -2107,32 +2797,76 @@ export class GameRenderer {
       const key = `cmd-${marker.id}`;
       live.add(key);
       const obj = this.ensure(key, () => {
-        const colors = {
+        const colors: Record<CommandMarker["kind"], number> = {
           move: 0x72c9ff,
-          gather: 0x83db8a,
+          gather: 0xe6c866,
           attack: 0xff6e67,
           patrol: 0xe4bd67,
           rally: 0xffd475,
+          guard: 0x18e8b0,
         };
+        if (marker.kind === "guard") {
+          // Expanding emerald/teal outer ring + inner hexagonal shield pulse.
+          const g = new THREE.Group();
+          const outer = new THREE.Mesh(
+            this.cmdGuardOuterGeo,
+            new THREE.MeshBasicMaterial({
+              color: 0x18e8b0,
+              transparent: true,
+              opacity: 0.92,
+              side: THREE.DoubleSide,
+              depthTest: false,
+              depthWrite: false,
+              toneMapped: false,
+            }),
+          );
+          outer.renderOrder = 27;
+          const shield = new THREE.Mesh(
+            this.cmdGuardShieldGeo,
+            new THREE.MeshBasicMaterial({
+              color: 0x66ffe0,
+              transparent: true,
+              opacity: 0.95,
+              side: THREE.DoubleSide,
+              depthTest: false,
+              depthWrite: false,
+              toneMapped: false,
+            }),
+          );
+          shield.position.y = 0.05;
+          shield.renderOrder = 28;
+          g.add(outer, shield);
+          return g;
+        }
         const ring = new THREE.Mesh(
-          new THREE.RingGeometry(3.5, 5, 24),
+          this.cmdRingGeo,
           new THREE.MeshBasicMaterial({
             color: colors[marker.kind],
             transparent: true,
             opacity: 0.9,
             side: THREE.DoubleSide,
+            depthTest: false,
             depthWrite: false,
+            toneMapped: false,
           }),
         );
-        ring.rotation.x = -Math.PI / 2;
+        ring.renderOrder = 27;
         return ring;
       });
-      setPos3(obj, marker.pos.x, marker.pos.y, 0.35);
+      setPos3(obj, marker.pos.x, marker.pos.y, 0.85);
       const pulse = 1 + (1.4 - marker.life) * 1.8;
       obj.scale.setScalar(Math.max(0.5, pulse));
-      const mesh = obj as THREE.Mesh;
-      if (mesh.material instanceof THREE.MeshBasicMaterial) {
-        mesh.material.opacity = Math.max(0, marker.life / 1.4);
+      const opacity = Math.max(0, Math.min(1, marker.life / 1.4));
+      if (obj instanceof THREE.Mesh) {
+        if (obj.material instanceof THREE.MeshBasicMaterial) {
+          obj.material.opacity = opacity;
+        }
+      } else {
+        obj.rotation.y = (1.4 - marker.life) * 0.9;
+        for (const child of obj.children) {
+          const mat = (child as THREE.Mesh).material;
+          if (mat instanceof THREE.MeshBasicMaterial) mat.opacity = opacity;
+        }
       }
     }
     this.prune("cmd-", live);
@@ -2230,6 +2964,27 @@ export class GameRenderer {
   }
 
   dispose() {
+    this.disposeRangeRings();
+    for (const [k, obj] of this.entityMap) {
+      if (k.startsWith("cmd-")) this.disposeCommandMarkerObject(obj);
+    }
+    this.commandLines.geometry.dispose();
+    (this.commandLines.material as THREE.Material).dispose();
+    this.rallyLine.geometry.dispose();
+    (this.rallyLine.material as THREE.Material).dispose();
+    this.guardTetherLines.geometry.dispose();
+    (this.guardTetherLines.material as THREE.Material).dispose();
+    this.unitRingGlowGeo.dispose();
+    this.unitRingCoreGeo.dispose();
+    this.unitSelGlowMat.dispose();
+    this.unitSelCoreMat.dispose();
+    this.guardRingGlowMat.dispose();
+    this.guardRingCoreMat.dispose();
+    this.targetRingGlowMat.dispose();
+    this.targetRingCoreMat.dispose();
+    this.cmdRingGeo.dispose();
+    this.cmdGuardOuterGeo.dispose();
+    this.cmdGuardShieldGeo.dispose();
     this.skyEnv?.dispose();
     this.renderer.dispose();
   }

@@ -45,6 +45,16 @@ export type RemoteOrder =
   | { t: "possess"; team: Team; id: number }
   | { t: "unpossess"; team: Team }
   | { t: "defend"; team: Team; layer: DefendLayerId | null }
+  | { t: "unitMove"; team: Team; ids: number[]; x: number; y: number }
+  | { t: "unitAttackUnit"; team: Team; ids: number[]; targetId: number }
+  | { t: "unitAttackBuilding"; team: Team; ids: number[]; buildingId: number }
+  | { t: "unitAttackBarricade"; team: Team; ids: number[]; barricadeId: number }
+  | { t: "unitAttackKeep"; team: Team; ids: number[] }
+  | { t: "unitGuard"; team: Team; ids: number[]; guardId: number }
+  | { t: "unitPatrol"; team: Team; ids: number[]; x: number; y: number }
+  | { t: "unitHold"; team: Team; ids: number[]; hold: boolean }
+  | { t: "unitStop"; team: Team; ids: number[] }
+  | { t: "unitRelease"; team: Team; ids: number[] }
   | { t: "duelPropose"; team: Team }
   | { t: "duelAccept"; team: Team }
   | { t: "duelDecline"; team: Team };
@@ -76,6 +86,12 @@ export interface SnapUnit {
   rallyBuffTimer?: number;
   /** Driven look yaw (radians). Present while a player is in the body. */
   facing?: number;
+  guardUnitId?: number;
+  orderTargetUnitId?: number;
+  orderTargetBuildingId?: number;
+  orderTargetKeep?: boolean;
+  holdPosition?: boolean;
+  manualOrder?: boolean;
 }
 
 export interface SnapVillager {
@@ -258,6 +274,16 @@ const ORDER_TYPES = new Set<RemoteOrder["t"]>([
   "possess",
   "unpossess",
   "defend",
+  "unitMove",
+  "unitAttackUnit",
+  "unitAttackBuilding",
+  "unitAttackBarricade",
+  "unitAttackKeep",
+  "unitGuard",
+  "unitPatrol",
+  "unitHold",
+  "unitStop",
+  "unitRelease",
   "duelPropose",
   "duelAccept",
   "duelDecline",
