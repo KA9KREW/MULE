@@ -238,6 +238,7 @@ function doctrineCommander(sim: GameSim, team: Team) {
     if (!consecrated && !savingForChurch && !savingForTrebGold) {
       if (ballistas.length < plan.wantBallistas) sim.placeAiBuilding("ballista", 0, team);
       else if (catapults.length < plan.wantCatapults) sim.placeAiBuilding("catapult", 0, team);
+      else if (barracks < plan.wantBarracks) sim.placeAiBuilding("barracks", 0, team);
       else if (barracks < 3 && freeGold >= 220 && freeWood >= 140) {
         sim.placeAiBuilding("barracks", 0, team);
       }
@@ -285,24 +286,29 @@ function doctrineCommander(sim: GameSim, team: Team) {
     } else if (savingForTrebGold) {
       // Wood is ready for a Trebuchet — hold gold for 2-3s until 150g instead of draining it on levies.
     } else {
+      const screenCount = Math.max(0, armyUsed - trebs - rams);
+      const underHomeSiege =
+        plan.emergencyDefend ||
+        (plan.desiredLayer === "home" && intel.approachingHome >= 6 && screenCount < Math.max(8, intel.approachingHome));
+      const canQueueSiege = !underHomeSiege && screenCount >= 5;
       for (let b = 0; b < barracks; b++) {
         const w = state.wood[team];
         const g = state.gold[team];
         const slotsLeft = armyCap - sim.armySlotsUsed(team);
-        if (b === 0 && trebs < plan.wantTrebs && w >= 200 && g >= 150) {
+        if (b === 0 && canQueueSiege && trebs < plan.wantTrebs && w >= 200 && g >= 150) {
           sim.aiEnqueueTrain("trebuchet", team);
-        } else if (b === 0 && !plan.bankForTreb && rams < plan.wantRams && w >= 100 && g >= 75) {
+        } else if (b === 0 && canQueueSiege && !plan.bankForTreb && rams < plan.wantRams && w >= 100 && g >= 75) {
           sim.aiEnqueueTrain("rammer", team);
         } else if (b === 0 && spies < plan.wantSpies && g >= 165) {
           sim.aiEnqueueTrain("spy", team);
-        } else if ((needFirstSiege || plan.bankForTreb) && slotsLeft <= 2) {
+        } else if (canQueueSiege && (needFirstSiege || plan.bankForTreb) && slotsLeft <= 2) {
           // Reserve final cap slots for siege engines instead of filling them with screen.
-        } else if (plan.bankForTreb && w < 200) {
+        } else if (!underHomeSiege && plan.bankForTreb && w < 200) {
           // Spend gold on wood-free levies while banking 200 timber for the trebuchet.
           if (g >= 60 + (savingForDogs ? 90 : 0)) sim.aiEnqueueTrain("levy", team);
         } else {
           const pick = pickAdaptiveScreenUnit(plan, tick + b);
-          const train: TrainKind = needFirstSiege && pick === "archer" && w < 180 ? "levy" : pick;
+          const train: TrainKind = canQueueSiege && needFirstSiege && pick === "archer" && w < 180 ? "levy" : pick;
           sim.aiEnqueueTrain(train, team);
         }
       }

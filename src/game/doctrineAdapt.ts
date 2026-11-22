@@ -50,6 +50,7 @@ export interface AdaptivePlan {
   stance: AdaptiveStance;
   wantBallistas: number;
   wantCatapults: number;
+  wantBarracks: number;
   wantTrebs: number;
   wantRams: number;
   wantSpies: number;
@@ -187,6 +188,10 @@ export function adaptDoctrinePlan(
   const lateDefense = own.ecoFull && (own.churches >= 1 || own.time >= 200 || intel.totalArmy >= 10);
   let wantBallistas = lateDefense ? Math.max(tune.ballistaGoal, 2) : tune.ballistaGoal;
   let wantCatapults = lateDefense ? 1 : 0;
+  const wantBarracks =
+    own.ecoFull && (intel.totalArmy >= 16 || intel.barracks >= 2 || intel.churches >= 2 || own.time >= 210)
+      ? Math.max(tune.barracksGoal, 2)
+      : tune.barracksGoal;
 
   const profileFortressHint = Boolean(hasProfile && profile && profile.fortressRate >= 0.65 && own.time >= 130);
   const fortified =
@@ -225,7 +230,7 @@ export function adaptDoctrinePlan(
   if (intel.trebs >= 1 || intel.rams >= 3) {
     stance = "anti-siege";
     if (intel.trebs >= 1) {
-      wantSpies = own.ecoFull ? Math.max(wantSpies, Math.min(3, intel.trebs + 1)) : wantSpies;
+      wantSpies = own.ecoFull ? Math.max(wantSpies, Math.min(4, intel.trebs + 1)) : wantSpies;
       // Fast runners (54 spd, 1.55x melee vs trebs) rush enemy trebs down.
       runnerPct = 25;
       archerPct = Math.min(archerPct, 10); // Archers deal only 0.28x to trebs.
@@ -260,8 +265,10 @@ export function adaptDoctrinePlan(
   if (intel.wards >= 4 && intel.wards >= intel.levies) {
     if (stance === "standard") stance = "anti-ward";
     archerPct = 0; // Archers only deal 0.40x to Wards; Levies deal 1.25x bonus vs Wards.
-    wardPct = Math.min(wardPct, 20);
+    // If the enemy backs their Ward wall with a big Archer volley, keep enough Wards + Catapult to soak arrows!
+    wardPct = intel.archers >= 6 ? Math.max(wardPct, 35) : Math.min(wardPct, 20);
     wantBallistas = Math.max(wantBallistas, 2);
+    if (intel.archers >= 6) wantCatapults = Math.max(wantCatapults, 1);
     upgradePref = "damage";
   } else if (intel.archers >= 5) {
     if (stance === "standard") stance = "anti-swarm";
@@ -301,11 +308,14 @@ export function adaptDoctrinePlan(
   let requireTrebs = 0;
   if (greedyEnemy) {
     pushFloor = Math.max(12, tune.attackAt - tune.greedDrop);
-  } else if (intel.defenseTowers >= 3 && own.churches >= 1) {
-    pushFloor = Math.min(own.armyCap - 3, Math.max(tune.attackAt, tune.fortressPush));
-    requireTrebs = 2;
-  } else if (intel.totalArmy >= 22 && own.churches >= 1) {
-    pushFloor = Math.min(own.armyCap - 3, Math.max(tune.attackAt, Math.min(32, intel.totalArmy)));
+  } else if (intel.defenseTowers >= 3) {
+    pushFloor = Math.min(own.armyCap - 2, Math.max(tune.attackAt, tune.fortressPush));
+    requireTrebs = own.ecoFull ? 2 : 0;
+  }
+  if (!greedyEnemy && intel.totalArmy >= 16) {
+    // Never trickle small squads into a larger visible enemy army — match their mass first.
+    const parityTarget = Math.min(34, Math.ceil(intel.totalArmy * 0.85));
+    pushFloor = Math.min(own.armyCap - 2, Math.max(pushFloor, parityTarget));
   }
 
   // 7. Goal-based economy reservation + worker resource steering (#4).
@@ -363,7 +373,7 @@ export function adaptDoctrinePlan(
       : intel.defenseTowers < 2 || own.trebs >= 1 || own.rams >= 1;
   const cappedOut = own.armyUsed >= Math.max(tune.attackAt, own.armyCap - 2);
 
-  // Detect stalled fortress push: we went in with siege, all siege got sniped, enemy keep is still healthy.
+  // Detect stalled push: siege got sniped OR our assault force got badly outnumbered while keep is healthy.
   const siegeWipedMidPush =
     alreadyPushing &&
     mem.wasAssaulting &&
@@ -375,7 +385,14 @@ export function adaptDoctrinePlan(
     own.armyUsed >= 7 &&
     !cappedOut;
 
-  if (siegeWipedMidPush) {
+  const outnumberedMidPush =
+    alreadyPushing &&
+    intel.totalArmy >= 18 &&
+    own.armyUsed < Math.floor(intel.totalArmy * 0.5) &&
+    own.enemyKeepHpRatio > tune.retreatKeepHp &&
+    !cappedOut;
+
+  if (siegeWipedMidPush || outnumberedMidPush) {
     mem.retreatUntil = own.time + 18;
     mem.wasAssaulting = false;
     mem.hadSiegeOnPush = false;
@@ -386,9 +403,18 @@ export function adaptDoctrinePlan(
     stance = "regroup";
   }
 
+  // Army parity discipline: avoid suicide-charging a smaller army into a much larger enemy ball.
+  const severelyOutnumbered =
+    intel.totalArmy >= 16 &&
+    own.armyUsed < Math.floor(intel.totalArmy * 0.72) &&
+    own.enemyKeepHpRatio > 0.35;
+  const defendUnderTowers =
+    severelyOutnumbered && (intel.approachingHome >= 5 || !cappedOut);
+
   const attackReady =
     !keepThreatened &&
     !regrouping &&
+    !defendUnderTowers &&
     (cappedOut ||
       (alreadyPushing && own.armyUsed >= Math.max(6, Math.floor(pushFloor / 2.2))) ||
       (own.armyUsed >= pushFloor && hasSiege));
@@ -427,6 +453,7 @@ export function adaptDoctrinePlan(
     stance,
     wantBallistas,
     wantCatapults,
+    wantBarracks,
     wantTrebs,
     wantRams,
     wantSpies,
