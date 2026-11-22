@@ -283,6 +283,13 @@ export class GameSim {
     string,
     { body: number | null; keys: { w: boolean; a: boolean; s: boolean; d: boolean }; yaw: number; strike: boolean }
   >();
+  /** Fractional wood/gold accumulator for smooth AoE2-style repair resource trickle. */
+  private repairCostAcc: Record<Team, { gold: number; wood: number }> = {
+    you: { gold: 0, wood: 0 },
+    foe: { gold: 0, wood: 0 },
+  };
+  /** Accumulated HP healed since the last floating "+HP" pulse, keyed by villager id. */
+  private repairPulseHp = new Map<number, number>();
 
   constructor() {
     const meta = loadMeta();
@@ -291,6 +298,8 @@ export class GameSim {
   }
 
   private makeFreshState(map: MapDef): GameState {
+    this.repairCostAcc = { you: { gold: 0, wood: 0 }, foe: { gold: 0, wood: 0 } };
+    this.repairPulseHp.clear();
     const meta = loadMeta();
     const stash = openingStash(map.lanes);
     const pads = buildPads(map);
@@ -656,7 +665,9 @@ export class GameSim {
       const band = riverLayers(seed).find((b) => b.id === belt);
       const bridges = band
         ? lanes.map((lane) => bridgeCrossing(seed, lane, band))
-        : [defendPointFor(seed, layer, 0, 0, team)];
+        : layer === "mid"
+          ? lanes.map((lane) => defendPointFor(seed, layer, lane, 0, team))
+          : [defendPointFor(seed, layer, 0, 0, team)];
       const load = bridges.map(() => 0);
       const fwd = team === "you" ? -1 : 1;
 
@@ -702,10 +713,11 @@ export class GameSim {
           const lane = lanes[Math.min(slot, lanes.length - 1)] ?? u.lane;
           u.lane = lane;
           // Anchor slightly on our side of the bridgehead so the formation fans out cleanly.
+          // Dry midfield hold points already sit on our side of center.
           const bPt = bridges[slot]!;
-          const anchor = { x: bPt.x, y: bPt.y - 10 * fwd };
+          const anchor = band ? { x: bPt.x, y: bPt.y - 10 * fwd } : bPt;
           const laneHasTreb = trebs.some((e) => e.lane === lane);
-          addToGroup(`bridge:${slot}`, anchor, u, laneHasTreb, true);
+          addToGroup(`bridge:${slot}`, anchor, u, laneHasTreb, !!band);
         }
       }
     }
@@ -931,6 +943,23 @@ export class GameSim {
     }
     if (order.t === "work") {
       this.holdPrediction(this.assignIdlePeons(team));
+      return;
+    }
+    if (order.t === "repair") {
+      const assigned = this.dispatchPeonsToRepair(team);
+      if (assigned.length > 0) this.holdPrediction(assigned);
+      return;
+    }
+    if (order.t === "repairTarget") {
+      if (
+        this.applyPeonsRepairTarget(team, order.ids, {
+          buildingId: order.buildingId,
+          barricadeId: order.barricadeId,
+          keep: order.keep,
+        })
+      ) {
+        this.holdPrediction(order.ids);
+      }
       return;
     }
     if (order.t === "stop") {
@@ -1602,7 +1631,7 @@ export class GameSim {
     const shot = this.possessTrebShot(u);
     if (!shot) {
       s.possessCharge = 0.82;
-      this.addToast("No tower in the sights.");
+      this.addToast("No structure in the sights.");
       return false;
     }
     s.possessCharge = 0;
@@ -2098,7 +2127,30 @@ export class GameSim {
     return this.applyUnitRelease(team, ids);
   }
 
-  private applyUnitMove(team: Team, ids: number[], pos: Vec2): boolean {
+  /** Fair team-scoped AoE2 micro wrappers used by AI commanders (silent: no player toasts/markers). */
+  aiUnitMove(team: Team, ids: number[], pos: Vec2): boolean {
+    return this.applyUnitMove(team, ids, pos, true);
+  }
+  aiUnitGuard(team: Team, ids: number[], guardId: number): boolean {
+    return this.applyUnitGuard(team, ids, guardId, true);
+  }
+  aiUnitAttackUnit(team: Team, ids: number[], targetId: number): boolean {
+    return this.applyUnitAttackUnit(team, ids, targetId, true);
+  }
+  aiUnitAttackBuilding(team: Team, ids: number[], buildingId: number): boolean {
+    return this.applyUnitAttackBuilding(team, ids, buildingId, true);
+  }
+  aiUnitAttackBarricade(team: Team, ids: number[], barricadeId: number): boolean {
+    return this.applyUnitAttackBarricade(team, ids, barricadeId, true);
+  }
+  aiUnitAttackKeep(team: Team, ids: number[]): boolean {
+    return this.applyUnitAttackKeep(team, ids, true);
+  }
+  aiUnitRelease(team: Team, ids: number[]): boolean {
+    return this.applyUnitRelease(team, ids, true);
+  }
+
+  private applyUnitMove(team: Team, ids: number[], pos: Vec2, silent = false): boolean {
     const squad = this.selectedSquad(team, ids);
     if (squad.length === 0) return false;
     const dest = this.clampToMap(pos);
@@ -2111,11 +2163,13 @@ export class GameSim {
       u.rallyPoint = slot;
       u.lane = this.nearestLaneFor(team, slot);
     }
-    this.state.commandMarkers.push({ id: this.next(), kind: "move", pos: { ...dest }, life: 1.1 });
+    if (!silent) {
+      this.state.commandMarkers.push({ id: this.next(), kind: "move", pos: { ...dest }, life: 1.1 });
+    }
     return true;
   }
 
-  private applyUnitGuard(team: Team, ids: number[], guardId: number): boolean {
+  private applyUnitGuard(team: Team, ids: number[], guardId: number, silent = false): boolean {
     const guarded = this.state.units.find((u) => u.id === guardId && u.team === team && u.hp > 0);
     if (!guarded) return false;
     const escorts = this.selectedSquad(team, ids).filter((u) => u.id !== guardId);
@@ -2128,12 +2182,14 @@ export class GameSim {
       u.rallyPoint = slots.get(u.id) ?? { ...guarded.pos };
       u.lane = guarded.lane;
     }
-    this.state.commandMarkers.push({ id: this.next(), kind: "guard", pos: { ...guarded.pos }, life: 1.2 });
-    this.tell(team, `Guarding ${UNIT_DEFS[guarded.kind].label}`);
+    if (!silent) {
+      this.state.commandMarkers.push({ id: this.next(), kind: "guard", pos: { ...guarded.pos }, life: 1.2 });
+      this.tell(team, `Guarding ${UNIT_DEFS[guarded.kind].label}`);
+    }
     return true;
   }
 
-  private applyUnitAttackUnit(team: Team, ids: number[], targetId: number): boolean {
+  private applyUnitAttackUnit(team: Team, ids: number[], targetId: number, silent = false): boolean {
     const target = this.state.units.find((u) => u.id === targetId && u.team !== team && u.hp > 0);
     if (!target) return false;
     const squad = this.selectedSquad(team, ids);
@@ -2145,11 +2201,13 @@ export class GameSim {
       u.rallyPoint = undefined;
       u.lane = this.nearestLaneFor(team, target.pos);
     }
-    this.state.commandMarkers.push({ id: this.next(), kind: "attack", pos: { ...target.pos }, life: 1.1 });
+    if (!silent) {
+      this.state.commandMarkers.push({ id: this.next(), kind: "attack", pos: { ...target.pos }, life: 1.1 });
+    }
     return true;
   }
 
-  private applyUnitAttackBuilding(team: Team, ids: number[], buildingId: number): boolean {
+  private applyUnitAttackBuilding(team: Team, ids: number[], buildingId: number, silent = false): boolean {
     const b = this.state.buildings.find((x) => x.id === buildingId && x.team !== team && x.hp > 0);
     if (!b) return false;
     const squad = this.selectedSquad(team, ids);
@@ -2161,11 +2219,13 @@ export class GameSim {
       u.rallyPoint = undefined;
       u.lane = this.nearestLaneFor(team, b.pos);
     }
-    this.state.commandMarkers.push({ id: this.next(), kind: "attack", pos: { ...b.pos }, life: 1.1 });
+    if (!silent) {
+      this.state.commandMarkers.push({ id: this.next(), kind: "attack", pos: { ...b.pos }, life: 1.1 });
+    }
     return true;
   }
 
-  private applyUnitAttackBarricade(team: Team, ids: number[], barricadeId: number): boolean {
+  private applyUnitAttackBarricade(team: Team, ids: number[], barricadeId: number, silent = false): boolean {
     const bar = this.state.barricades.find((x) => x.id === barricadeId && x.team !== team && x.hp > 0);
     if (!bar) return false;
     const squad = this.selectedSquad(team, ids);
@@ -2177,11 +2237,13 @@ export class GameSim {
       u.rallyPoint = undefined;
       u.lane = bar.lane;
     }
-    this.state.commandMarkers.push({ id: this.next(), kind: "attack", pos: { ...bar.pos }, life: 1.1 });
+    if (!silent) {
+      this.state.commandMarkers.push({ id: this.next(), kind: "attack", pos: { ...bar.pos }, life: 1.1 });
+    }
     return true;
   }
 
-  private applyUnitAttackKeep(team: Team, ids: number[]): boolean {
+  private applyUnitAttackKeep(team: Team, ids: number[], silent = false): boolean {
     const squad = this.selectedSquad(team, ids);
     if (squad.length === 0) return false;
     const enemyKeep = this.teamKeep(this.enemy(team));
@@ -2191,7 +2253,9 @@ export class GameSim {
       u.orderTargetKeep = true;
       u.rallyPoint = undefined;
     }
-    this.state.commandMarkers.push({ id: this.next(), kind: "attack", pos: { ...enemyKeep.pos }, life: 1.1 });
+    if (!silent) {
+      this.state.commandMarkers.push({ id: this.next(), kind: "attack", pos: { ...enemyKeep.pos }, life: 1.1 });
+    }
     return true;
   }
 
@@ -2240,7 +2304,7 @@ export class GameSim {
     return true;
   }
 
-  private applyUnitRelease(team: Team, ids: number[]): boolean {
+  private applyUnitRelease(team: Team, ids: number[], silent = false): boolean {
     const squad = this.selectedSquad(team, ids);
     if (squad.length === 0) return false;
     for (const u of squad) {
@@ -2250,7 +2314,9 @@ export class GameSim {
     }
     const layer = this.state.defendLayer[team];
     if (layer) this.assignDefendRallies(team, layer, true, false);
-    this.tell(team, "Units released to auto.");
+    if (!silent) {
+      this.tell(team, "Units released to auto.");
+    }
     return true;
   }
 
@@ -2311,12 +2377,16 @@ export class GameSim {
     v.targetNodeId = undefined;
     v.targetEnemyId = undefined;
     v.targetBarricadeId = undefined;
+    v.targetRepairBuildingId = undefined;
+    v.targetRepairBarricadeId = undefined;
+    v.targetRepairKeep = undefined;
     v.moveTarget = undefined;
     v.patrolA = undefined;
     v.patrolB = undefined;
     v.patrolToB = undefined;
     v.engageFrom = undefined;
     v.forcedAttack = false;
+    this.repairPulseHp.delete(v.id);
   }
 
   private peonsById(team: Team, ids: number[]) {
@@ -2334,7 +2404,9 @@ export class GameSim {
         v.state !== "garrisoned" &&
         v.state !== "toGarrison" &&
         v.state !== "toBarricade" &&
-        v.state !== "buildingBarricade",
+        v.state !== "buildingBarricade" &&
+        v.state !== "toRepair" &&
+        v.state !== "repairing",
     );
     const idle = free
       .filter((v) => v.state === "idle" || v.state === "home")
@@ -2343,7 +2415,29 @@ export class GameSim {
     return [...free].sort((a, b) => dist(a.pos, node.pos) - dist(b.pos, node.pos))[0];
   }
 
-  commandSelected(world: { x: number; y: number }, hit: RectHit | null, patrol = false) {
+  /** True when a clicked/right-clicked hit is a living damaged friendly structure (building, built barricade, or keep). */
+  isDamagedFriendlyHit(hit: (RectHit | { kind: "barricade"; id: string }) | null, team: Team = this.localTeam): boolean {
+    return this.repairTargetFromHit(team, hit) !== null;
+  }
+
+  /** Order selected friendly peons to repair a specific friendly damaged structure. */
+  commandSelectedPeonsRepair(target: { buildingId?: number; barricadeId?: number; keep?: boolean }): boolean {
+    const team = this.localTeam;
+    const selected = this.peonsById(team, this.state.selectedVillagerIds);
+    if (selected.length === 0) return false;
+    const ids = selected.map((v) => v.id);
+    if (this.orderSink && !this.applyingRemote) {
+      this.redirect({ t: "repairTarget", team, ids, ...target });
+      return true;
+    }
+    return this.applyPeonsRepairTarget(team, ids, target);
+  }
+
+  commandSelected(
+    world: { x: number; y: number },
+    hit: (RectHit | { kind: "barricade"; id: string }) | null,
+    patrol = false,
+  ) {
     const team = this.localTeam;
     const selected = this.peonsById(team, this.state.selectedVillagerIds);
     if (this.orderSink && !this.applyingRemote) {
@@ -2355,6 +2449,13 @@ export class GameSim {
         return;
       }
       const ids = selected.map((v) => v.id);
+      if (!patrol) {
+        const repairSpec = this.repairSpecFromHit(team, hit);
+        if (repairSpec) {
+          this.redirect({ t: "repairTarget", team, ids, ...repairSpec });
+          return;
+        }
+      }
       if (hit?.kind === "node") {
         this.redirect({ t: "gather", team, ids, nodeId: hit.id });
         return;
@@ -2377,6 +2478,12 @@ export class GameSim {
       if (barracks) this.setRally(team, barracks.id, world);
       return;
     }
+    if (!patrol) {
+      const repairSpec = this.repairSpecFromHit(team, hit);
+      if (repairSpec && this.applyPeonsRepairTarget(team, selected.map((v) => v.id), repairSpec)) {
+        return;
+      }
+    }
     this.commandIds(
       team,
       selected.map((v) => v.id),
@@ -2390,7 +2497,7 @@ export class GameSim {
     team: Team,
     ids: number[],
     world: { x: number; y: number },
-    hit: RectHit | null,
+    hit: (RectHit | { kind: "barricade"; id: string }) | null,
     patrol: boolean,
   ) {
     const selected = this.peonsById(team, ids);
@@ -2505,7 +2612,9 @@ export class GameSim {
           v.state !== "garrisoned" &&
           v.state !== "toGarrison" &&
           v.state !== "toBarricade" &&
-          v.state !== "buildingBarricade",
+          v.state !== "buildingBarricade" &&
+          v.state !== "toRepair" &&
+          v.state !== "repairing",
       )
       .sort((a, b) => dist(a.pos, world) - dist(b.pos, world))[0];
   }
@@ -2545,7 +2654,9 @@ export class GameSim {
         v.state !== "garrisoned" &&
         v.state !== "toGarrison" &&
         v.state !== "toBarricade" &&
-        v.state !== "buildingBarricade",
+        v.state !== "buildingBarricade" &&
+        v.state !== "toRepair" &&
+        v.state !== "repairing",
     );
     const builder =
       (builderId != null ? pool.find((v) => v.id === builderId) : undefined) ??
@@ -2596,7 +2707,7 @@ export class GameSim {
     return alive + queued;
   }
 
-  /** Keep grants 15/20/25 by road count; purple mid houses +5 each; churches +10 each. */
+  /** Keep grants 20 base army slots; purple mid houses +5 each; churches +15 each (50 max with 2 churches). */
   armyCap(team: Team) {
     const midHouses = this.state.buildings.filter(
       (b) => b.team === team && b.kind === "house" && this.state.pads.find((p) => p.id === b.padId)?.zone === "midEco",
@@ -2633,7 +2744,7 @@ export class GameSim {
     return this.state.pads.find((p) => p.id === padId)?.zone === "midEco";
   }
 
-  /** Towers, halls, and churches — houses are off-limits. */
+  /** All pad buildings (towers, barracks, churches, and houses) are valid trebuchet targets. */
   private canTrebuchetTarget(b: Building) {
     return isTrebuchetBuilding(b.kind);
   }
@@ -2753,6 +2864,10 @@ export class GameSim {
       }
       v.targetNodeId = undefined;
       v.targetEnemyId = undefined;
+      v.targetRepairBuildingId = undefined;
+      v.targetRepairBarricadeId = undefined;
+      v.targetRepairKeep = undefined;
+      this.repairPulseHp.delete(v.id);
       v.state = "toGarrison";
     }
     this.tell(
@@ -3193,7 +3308,9 @@ export class GameSim {
         v.state !== "garrisoned" &&
         v.state !== "toGarrison" &&
         v.state !== "toBarricade" &&
-        v.state !== "buildingBarricade",
+        v.state !== "buildingBarricade" &&
+        v.state !== "toRepair" &&
+        v.state !== "repairing",
     );
     let chosen = teamVillagers
       .filter((v) => v.state === "idle" || v.state === "home")
@@ -3237,6 +3354,10 @@ export class GameSim {
         if (node) node.workers = Math.max(0, node.workers - 1);
       }
       v.targetNodeId = undefined;
+      v.targetRepairBuildingId = undefined;
+      v.targetRepairBarricadeId = undefined;
+      v.targetRepairKeep = undefined;
+      this.repairPulseHp.delete(v.id);
       v.moveTarget = undefined;
       v.patrolA = undefined;
       v.patrolB = undefined;
@@ -3296,6 +3417,10 @@ export class GameSim {
       const peon = pool.shift()!;
       peon.targetEnemyId = undefined;
       peon.targetBarricadeId = undefined;
+      peon.targetRepairBuildingId = undefined;
+      peon.targetRepairBarricadeId = undefined;
+      peon.targetRepairKeep = undefined;
+      this.repairPulseHp.delete(peon.id);
       peon.moveTarget = undefined;
       peon.patrolA = undefined;
       peon.patrolB = undefined;
@@ -3312,6 +3437,379 @@ export class GameSim {
     else if (free.length > 0) this.tell(team, "Groves and mines are full.");
     else this.tell(team, "Peons are already at work.");
     return sent;
+  }
+
+  // ---- AoE2-style Peon Repair System ----
+
+  private repairSpecFromHit(
+    team: Team,
+    hit: (RectHit | { kind: "barricade"; id: string }) | null,
+  ): { buildingId?: number; barricadeId?: number; keep?: boolean } | null {
+    if (!hit) return null;
+    if (hit.kind === "building") {
+      const b = this.state.buildings.find(
+        (bld) => bld.id === Number(hit.id) && bld.team === team && bld.hp > 0 && bld.hp < bld.maxHp - 0.1,
+      );
+      return b ? { buildingId: b.id } : null;
+    }
+    if (hit.kind === "barricade") {
+      const bar = this.state.barricades.find(
+        (br) => br.id === Number(hit.id) && br.team === team && br.built && br.hp > 0 && br.hp < br.maxHp - 0.1,
+      );
+      return bar ? { barricadeId: bar.id } : null;
+    }
+    if (hit.kind === "keep" && hit.id === team && !this.state.arena) {
+      const keep = this.teamKeep(team);
+      if (keep.hp > 0 && keep.hp < keep.maxHp - 0.1) return { keep: true };
+    }
+    return null;
+  }
+
+  private repairTargetFromHit(
+    team: Team,
+    hit: (RectHit | { kind: "barricade"; id: string }) | null,
+  ) {
+    const spec = this.repairSpecFromHit(team, hit);
+    return spec ? this.resolveRepairSpec(team, spec) : null;
+  }
+
+  private listDamagedStructures(team: Team) {
+    const out: {
+      key: string;
+      kind: "building" | "barricade" | "keep";
+      id?: number;
+      pos: Vec2;
+      hp: number;
+      maxHp: number;
+      reach: number;
+      baseRate: number;
+      fullGoldCost: number;
+      fullWoodCost: number;
+    }[] = [];
+
+    for (const b of this.state.buildings) {
+      if (b.team !== team || b.hp <= 0 || b.hp >= b.maxHp - 0.1) continue;
+      const cost = BUILD_COST[b.kind];
+      out.push({
+        key: `b:${b.id}`,
+        kind: "building",
+        id: b.id,
+        pos: b.pos,
+        hp: b.hp,
+        maxHp: b.maxHp,
+        reach: 32,
+        baseRate: 12,
+        fullGoldCost: cost.gold * 0.25,
+        fullWoodCost: cost.wood * 0.25,
+      });
+    }
+
+    for (const bar of this.state.barricades) {
+      if (bar.team !== team || !bar.built || bar.hp <= 0 || bar.hp >= bar.maxHp - 0.1) continue;
+      const cost = BUILD_COST.barricade;
+      out.push({
+        key: `bar:${bar.id}`,
+        kind: "barricade",
+        id: bar.id,
+        pos: bar.pos,
+        hp: bar.hp,
+        maxHp: bar.maxHp,
+        reach: 32,
+        baseRate: 12,
+        fullGoldCost: cost.gold * 0.25,
+        fullWoodCost: cost.wood * 0.25,
+      });
+    }
+
+    if (!this.state.arena) {
+      const keep = this.teamKeep(team);
+      if (keep.hp > 0 && keep.hp < keep.maxHp - 0.1) {
+        out.push({
+          key: "keep",
+          kind: "keep",
+          pos: keep.pos,
+          hp: keep.hp,
+          maxHp: keep.maxHp,
+          reach: 44,
+          baseRate: 8,
+          fullGoldCost: 40,
+          fullWoodCost: 60,
+        });
+      }
+    }
+
+    return out;
+  }
+
+  private resolveRepairSpec(
+    team: Team,
+    spec: { buildingId?: number; barricadeId?: number; keep?: boolean },
+  ) {
+    if (spec.buildingId != null) {
+      const b = this.state.buildings.find(
+        (bld) => bld.id === spec.buildingId && bld.team === team && bld.hp > 0 && bld.hp < bld.maxHp - 0.1,
+      );
+      if (!b) return null;
+      const cost = BUILD_COST[b.kind];
+      return {
+        key: `b:${b.id}`,
+        kind: "building" as const,
+        id: b.id,
+        pos: b.pos,
+        hp: b.hp,
+        maxHp: b.maxHp,
+        reach: 32,
+        baseRate: 12,
+        fullGoldCost: cost.gold * 0.25,
+        fullWoodCost: cost.wood * 0.25,
+      };
+    }
+    if (spec.barricadeId != null) {
+      const bar = this.state.barricades.find(
+        (br) => br.id === spec.barricadeId && br.team === team && br.built && br.hp > 0 && br.hp < br.maxHp - 0.1,
+      );
+      if (!bar) return null;
+      const cost = BUILD_COST.barricade;
+      return {
+        key: `bar:${bar.id}`,
+        kind: "barricade" as const,
+        id: bar.id,
+        pos: bar.pos,
+        hp: bar.hp,
+        maxHp: bar.maxHp,
+        reach: 32,
+        baseRate: 12,
+        fullGoldCost: cost.gold * 0.25,
+        fullWoodCost: cost.wood * 0.25,
+      };
+    }
+    if (spec.keep && !this.state.arena) {
+      const keep = this.teamKeep(team);
+      if (keep.hp <= 0 || keep.hp >= keep.maxHp - 0.1) return null;
+      return {
+        key: "keep",
+        kind: "keep" as const,
+        pos: keep.pos,
+        hp: keep.hp,
+        maxHp: keep.maxHp,
+        reach: 44,
+        baseRate: 8,
+        fullGoldCost: 40,
+        fullWoodCost: 60,
+      };
+    }
+    return null;
+  }
+
+  private resolveRepairTarget(team: Team, v: Villager) {
+    return this.resolveRepairSpec(team, {
+      buildingId: v.targetRepairBuildingId,
+      barricadeId: v.targetRepairBarricadeId,
+      keep: v.targetRepairKeep,
+    });
+  }
+
+  private villagerRepairKey(v: Villager): string | null {
+    if (v.state !== "toRepair" && v.state !== "repairing") return null;
+    if (v.targetRepairBuildingId != null) return `b:${v.targetRepairBuildingId}`;
+    if (v.targetRepairBarricadeId != null) return `bar:${v.targetRepairBarricadeId}`;
+    if (v.targetRepairKeep) return "keep";
+    return null;
+  }
+
+  private assignVillagerRepairTarget(
+    v: Villager,
+    target: { kind: "building" | "barricade" | "keep"; id?: number; pos: Vec2; reach: number },
+  ) {
+    this.releasePeonTask(v);
+    v.targetRepairBuildingId = target.kind === "building" ? target.id : undefined;
+    v.targetRepairBarricadeId = target.kind === "barricade" ? target.id : undefined;
+    v.targetRepairKeep = target.kind === "keep" ? true : undefined;
+    v.state = dist(v.pos, target.pos) <= target.reach ? "repairing" : "toRepair";
+    v.timer = 0.55;
+    this.repairPulseHp.set(v.id, 0);
+  }
+
+  private sendPeonBackToWork(v: Villager, team: Team) {
+    v.targetRepairBuildingId = undefined;
+    v.targetRepairBarricadeId = undefined;
+    v.targetRepairKeep = undefined;
+    v.targetEnemyId = undefined;
+    v.targetBarricadeId = undefined;
+    v.moveTarget = undefined;
+    v.patrolA = undefined;
+    v.patrolB = undefined;
+    v.patrolToB = undefined;
+    v.engageFrom = undefined;
+    v.forcedAttack = false;
+    v.timer = 0;
+    this.repairPulseHp.delete(v.id);
+
+    const peons = this.state.villagers.filter((p) => p.team === team && p.hp > 0);
+    for (const node of this.state.nodes) {
+      if (node.team !== team) continue;
+      node.workers = peons.filter((p) => p.targetNodeId === node.id).length;
+    }
+
+    const target = this.pickWorkNode(team);
+    if (target) {
+      target.workers += 1;
+      v.targetNodeId = target.id;
+      v.state = v.carryingGold > 0 || v.carryingWood > 0 ? "toKeep" : "toNode";
+      if (team === this.localTeam) this.state.firstVillagerAssigned = true;
+    } else {
+      v.targetNodeId = undefined;
+      v.state = v.carryingGold > 0 || v.carryingWood > 0 ? "toKeep" : "idle";
+    }
+  }
+
+  private advanceOrReturnAfterRepair(v: Villager, team: Team) {
+    const remaining = this.listDamagedStructures(team);
+    if (remaining.length === 0) {
+      this.sendPeonBackToWork(v, team);
+      return;
+    }
+    const assignedCounts = new Map<string, number>();
+    for (const p of this.state.villagers) {
+      if (p.team !== team || p.hp <= 0 || p.id === v.id) continue;
+      const key = this.villagerRepairKey(p);
+      if (key) assignedCounts.set(key, (assignedCounts.get(key) ?? 0) + 1);
+    }
+    remaining.sort((a, b) => {
+      const aUnmanned = (assignedCounts.get(a.key) ?? 0) === 0 ? 0 : 1;
+      const bUnmanned = (assignedCounts.get(b.key) ?? 0) === 0 ? 0 : 1;
+      return aUnmanned - bUnmanned || dist(v.pos, a.pos) - dist(v.pos, b.pos);
+    });
+    this.assignVillagerRepairTarget(v, remaining[0]!);
+  }
+
+  private applyPeonsRepairTarget(
+    team: Team,
+    ids: number[],
+    spec: { buildingId?: number; barricadeId?: number; keep?: boolean },
+  ): boolean {
+    const target = this.resolveRepairSpec(team, spec);
+    if (!target) return false;
+    const selected = this.peonsById(team, ids).filter(
+      (v) => v.state !== "garrisoned" && v.state !== "toGarrison",
+    );
+    if (selected.length === 0) return false;
+    for (const v of selected) {
+      this.assignVillagerRepairTarget(v, target);
+    }
+    this.state.commandMarkers.push({
+      id: this.next(),
+      kind: "repair",
+      pos: { ...target.pos },
+      life: 1.15,
+    });
+    return true;
+  }
+
+  private dispatchPeonsToRepair(team: Team): number[] {
+    const damaged = this.listDamagedStructures(team);
+    if (damaged.length === 0) {
+      this.tell(team, "All structures are at full health.");
+      return [];
+    }
+
+    const living = this.state.villagers.filter(
+      (v) => v.team === team && v.hp > 0 && v.state !== "garrisoned" && v.state !== "toGarrison",
+    );
+    const assignedCounts = new Map<string, number>();
+    let existingRepairers = 0;
+    for (const v of living) {
+      const key = this.villagerRepairKey(v);
+      if (key) {
+        assignedCounts.set(key, (assignedCounts.get(key) ?? 0) + 1);
+        existingRepairers += 1;
+      }
+    }
+
+    // Prefer idle/home/moving/gathering peons; skip defenders & active barricade builders unless no others are free.
+    const preferred = living.filter(
+      (v) =>
+        v.state !== "toRepair" &&
+        v.state !== "repairing" &&
+        v.state !== "defend" &&
+        v.state !== "toBarricade" &&
+        v.state !== "buildingBarricade",
+    );
+    const fallback =
+      preferred.length === 0 && existingRepairers === 0
+        ? living.filter(
+            (v) =>
+              v.state !== "toRepair" &&
+              v.state !== "repairing" &&
+              (v.state === "defend" || v.state === "toBarricade" || v.state === "buildingBarricade"),
+          )
+        : [];
+    const pool = [...preferred, ...fallback];
+
+    const tierOf = (v: Villager) => {
+      if (v.state === "idle" || v.state === "home") return 0;
+      if (v.state === "moving" || v.state === "patrolling") return 1;
+      if (v.state === "toNode" || v.state === "gathering" || v.state === "toKeep") return 2;
+      if (v.state === "defend" && !v.forcedAttack) return 3;
+      if (v.state === "defend") return 4;
+      return 5;
+    };
+
+    const maxPerStructure = 3;
+    const assignedIds: number[] = [];
+    const touchedTargets = new Map<string, Vec2>();
+
+    while (pool.length > 0) {
+      // Pick the damaged structure with the fewest assigned repairers (< maxPerStructure).
+      const eligible = damaged
+        .filter((d) => (assignedCounts.get(d.key) ?? 0) < maxPerStructure)
+        .sort((a, b) => {
+          const ca = assignedCounts.get(a.key) ?? 0;
+          const cb = assignedCounts.get(b.key) ?? 0;
+          if (ca !== cb) return ca - cb;
+          return a.hp / Math.max(1, a.maxHp) - b.hp / Math.max(1, b.maxHp);
+        });
+      const target = eligible[0];
+      if (!target) break;
+
+      pool.sort((a, b) => tierOf(a) - tierOf(b) || dist(a.pos, target.pos) - dist(b.pos, target.pos));
+      const peon = pool.shift()!;
+      this.assignVillagerRepairTarget(peon, target);
+      assignedCounts.set(target.key, (assignedCounts.get(target.key) ?? 0) + 1);
+      assignedIds.push(peon.id);
+      touchedTargets.set(target.key, target.pos);
+    }
+
+    if (assignedIds.length > 0) {
+      for (const pos of touchedTargets.values()) {
+        this.state.commandMarkers.push({
+          id: this.next(),
+          kind: "repair",
+          pos: { ...pos },
+          life: 1.2,
+        });
+      }
+      const pCount = assignedIds.length;
+      const sCount = touchedTargets.size;
+      this.tell(
+        team,
+        `Sending ${pCount} peon${pCount === 1 ? "" : "s"} to repair ${sCount} structure${sCount === 1 ? "" : "s"}.`,
+      );
+      return assignedIds;
+    }
+
+    if (existingRepairers > 0) {
+      this.tell(team, "Peons are already repairing damaged structures.");
+    } else {
+      this.tell(team, "No peons available to repair.");
+    }
+    return [];
+  }
+
+  /** Send available friendly peons to repair all damaged structures, chaining automatically and returning to work when done. */
+  sendPeonsToRepair(team: Team = this.localTeam): boolean {
+    if (team === this.localTeam && this.redirect({ t: "repair", team })) return true;
+    return this.dispatchPeonsToRepair(team).length > 0;
   }
 
   private tryBuildOnPad(padId: string) {
@@ -3608,25 +4106,22 @@ export class GameSim {
         bestEngine = e;
       }
     }
-    let bestB: Building | undefined;
-    let bestBd = Infinity;
-    const line = (b: Building) => b.kind === "watchtower" || b.kind === "ballista" || b.kind === "catapult";
+    let bestTower: Building | undefined;
+    let bestTowerD = Infinity;
+    let bestOther: Building | undefined;
+    let bestOtherD = Infinity;
+    const isTower = (b: Building) => b.kind === "watchtower" || b.kind === "ballista" || b.kind === "catapult";
     for (const b of this.state.buildings) {
-      if (b.team === u.team || b.hp <= 0 || !line(b)) continue;
+      if (b.team === u.team || b.hp <= 0 || !this.canTrebuchetTarget(b)) continue;
       const d = dist(u.pos, b.pos);
-      if (d < bestBd) {
-        bestBd = d;
-        bestB = b;
-      }
-    }
-    if (!bestB) {
-      for (const b of this.state.buildings) {
-        if (b.team === u.team || b.hp <= 0 || !this.canTrebuchetTarget(b)) continue;
-        const d = dist(u.pos, b.pos);
-        if (d < bestBd) {
-          bestBd = d;
-          bestB = b;
+      if (isTower(b)) {
+        if (d < bestTowerD) {
+          bestTowerD = d;
+          bestTower = b;
         }
+      } else if (d < bestOtherD) {
+        bestOtherD = d;
+        bestOther = b;
       }
     }
     let bestBar: Barricade | undefined;
@@ -3639,15 +4134,20 @@ export class GameSim {
         bestBar = b;
       }
     }
-    if (bestB && bestBd <= TREBUCHET_RANGE) {
-      const target = bestB;
+    if (bestTower && bestTowerD <= TREBUCHET_RANGE) {
+      const target = bestTower;
+      return { pos: target.pos, inRange: true, fire: () => this.trebuchetHitBuilding(u, target) };
+    }
+    if (bestOther && bestOtherD <= TREBUCHET_RANGE) {
+      const target = bestOther;
       return { pos: target.pos, inRange: true, fire: () => this.trebuchetHitBuilding(u, target) };
     }
     if (bestBar && bestBard <= TREBUCHET_RANGE) {
       const wall = bestBar;
       return { pos: wall.pos, inRange: true, fire: () => this.trebuchetHitBarricade(u, wall) };
     }
-    if (bestB) return { pos: bestB.pos, inRange: false, fire: () => {} };
+    if (bestTower) return { pos: bestTower.pos, inRange: false, fire: () => {} };
+    if (bestOther) return { pos: bestOther.pos, inRange: false, fire: () => {} };
     if (bestEngine && bestEd <= TREBUCHET_RANGE) {
       const target = bestEngine;
       return { pos: target.pos, inRange: true, fire: () => this.trebuchetHitUnit(u, target) };
@@ -5928,6 +6428,13 @@ export class GameSim {
     const threats = this.enemiesThreateningKeep(team);
     const underAttack = threats.length > 0;
     const teamPeons = this.state.villagers.filter((x) => x.team === team);
+    const activeRepairCounts = new Map<string, number>();
+    for (const p of teamPeons) {
+      if (p.hp > 0 && p.state === "repairing") {
+        const key = this.villagerRepairKey(p);
+        if (key) activeRepairCounts.set(key, (activeRepairCounts.get(key) ?? 0) + 1);
+      }
+    }
 
     // Both skirmish players get the same idle-peon defense. Versus AI, only the
     // human side does — the north peons follow their own orders.
@@ -5994,6 +6501,95 @@ export class GameSim {
             this.emitCombat("buildComplete", v.pos, site.pos, team);
             this.tell(team, "Barricade complete — the road is blocked.");
           }
+        }
+        return;
+      }
+
+      if (v.state === "toRepair" || v.state === "repairing") {
+        if (this.peonRetaliate(v, team)) return;
+        const target = this.resolveRepairTarget(team, v);
+        if (!target) {
+          this.advanceOrReturnAfterRepair(v, team);
+          return;
+        }
+        if (v.state === "toRepair") {
+          moveTowards(v.pos, target.pos, v.speed, dt);
+          if (dist(v.pos, target.pos) <= target.reach) {
+            v.state = "repairing";
+            v.timer = 0.55;
+            this.repairPulseHp.set(v.id, 0);
+          }
+          return;
+        }
+        if (dist(v.pos, target.pos) > target.reach + 6) {
+          v.state = "toRepair";
+          return;
+        }
+        const helpers = Math.max(1, activeRepairCounts.get(target.key) ?? 1);
+        const effMult = (1 + (helpers - 1) * 0.5) / helpers;
+        const missing = Math.max(0, target.maxHp - target.hp);
+        const rawHeal = Math.min(missing, target.baseRate * effMult * dt);
+
+        const goldNeed = (rawHeal / Math.max(1, target.maxHp)) * target.fullGoldCost;
+        const woodNeed = (rawHeal / Math.max(1, target.maxHp)) * target.fullWoodCost;
+        const hasRes =
+          (goldNeed <= 0 || this.state.gold[team] > 0) &&
+          (woodNeed <= 0 || this.state.wood[team] > 0);
+        let heal: number;
+        if (hasRes) {
+          heal = rawHeal;
+          const acc = this.repairCostAcc[team];
+          acc.gold += goldNeed;
+          acc.wood += woodNeed;
+          if (acc.gold >= 1) {
+            const take = Math.min(this.state.gold[team], Math.floor(acc.gold));
+            this.state.gold[team] -= take;
+            acc.gold -= take;
+          }
+          if (acc.wood >= 1) {
+            const take = Math.min(this.state.wood[team], Math.floor(acc.wood));
+            this.state.wood[team] -= take;
+            acc.wood -= take;
+          }
+        } else {
+          // Never stall at 0 wood/gold: still repair at 50% speed for free.
+          heal = Math.min(missing, target.baseRate * effMult * 0.5 * dt);
+        }
+
+        let nextHp = target.hp + heal;
+        const finished = nextHp >= target.maxHp - 0.1;
+        if (finished) nextHp = target.maxHp;
+
+        if (target.kind === "building") {
+          const b = this.state.buildings.find((x) => x.id === target.id);
+          if (b) b.hp = nextHp;
+        } else if (target.kind === "barricade") {
+          const bar = this.state.barricades.find((x) => x.id === target.id);
+          if (bar) bar.hp = nextHp;
+        } else {
+          keep.hp = nextHp;
+        }
+
+        const pulseHp = (this.repairPulseHp.get(v.id) ?? 0) + heal;
+        this.repairPulseHp.set(v.id, pulseHp);
+        v.timer -= dt;
+        if (v.timer <= 0) {
+          v.timer = 1.2;
+          this.emitCombat("woodHit", v.pos, target.pos, team);
+          const shown = Math.max(1, Math.round(pulseHp));
+          this.repairPulseHp.set(v.id, 0);
+          this.addFloat(
+            `+${shown} HP`,
+            target.pos.x + ((v.id % 3) - 1) * 8,
+            target.pos.y - 16,
+            "#7ee898",
+          );
+        }
+
+        if (finished) {
+          this.emitCombat("buildComplete", v.pos, target.pos, team);
+          this.repairPulseHp.delete(v.id);
+          this.advanceOrReturnAfterRepair(v, team);
         }
         return;
       }
@@ -6474,7 +7070,9 @@ export class GameSim {
           v.state !== "toGarrison" &&
           v.state !== "defend" &&
           v.state !== "toBarricade" &&
-          v.state !== "buildingBarricade",
+          v.state !== "buildingBarricade" &&
+          v.state !== "toRepair" &&
+          v.state !== "repairing",
       )
       .sort((a, b) => {
         const aIdle = a.state === "idle" || a.state === "home" ? 0 : 1;
@@ -6831,6 +7429,16 @@ export class GameSim {
         case "work":
           this.sendPeonsToWork(team);
           break;
+        case "repair":
+          this.sendPeonsToRepair(team);
+          break;
+        case "repairTarget":
+          this.applyPeonsRepairTarget(team, order.ids, {
+            buildingId: order.buildingId,
+            barricadeId: order.barricadeId,
+            keep: order.keep,
+          });
+          break;
         case "build":
           this.buildFor(team, order.kind, order.padId);
           break;
@@ -7051,6 +7659,9 @@ export class GameSim {
         nodeId: v.targetNodeId,
         enemyId: v.targetEnemyId,
         barricadeId: v.targetBarricadeId,
+        repairBuildingId: v.targetRepairBuildingId,
+        repairBarricadeId: v.targetRepairBarricadeId,
+        repairKeep: v.targetRepairKeep,
         mx: v.moveTarget?.x,
         my: v.moveTarget?.y,
         ax: v.patrolA?.x,
@@ -7375,6 +7986,9 @@ export class GameSim {
       targetNodeId: v.nodeId,
       targetEnemyId: v.enemyId,
       targetBarricadeId: v.barricadeId,
+      targetRepairBuildingId: v.repairBuildingId,
+      targetRepairBarricadeId: v.repairBarricadeId,
+      targetRepairKeep: v.repairKeep,
       moveTarget: point(v.mx, v.my),
       patrolA: point(v.ax, v.ay),
       patrolB: point(v.bx, v.by),
@@ -7637,6 +8251,10 @@ export class GameSim {
       foeArmyCost: this.armyFieldCost(other),
       idlePeonCount: s.villagers.filter(
         (v) => v.team === view && this.peonReadyForWork(v) && !this.predicted.has(v.id),
+      ).length,
+      damagedStructureCount: this.listDamagedStructures(view).length,
+      repairingPeonCount: s.villagers.filter(
+        (v) => v.team === view && v.hp > 0 && (v.state === "toRepair" || v.state === "repairing"),
       ).length,
       keepGarrisoned: s.villagers.filter((v) => v.team === view && v.state === "garrisoned").length,
       keepGarrisonMax: KEEP_GARRISON_MAX,

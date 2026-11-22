@@ -211,10 +211,27 @@ export interface Villager {
   maxHp: number;
   /** Melee damage. AI peons carry the current wave scalar; humans stay at baseline. */
   damage: number;
-  state: "idle" | "toNode" | "gathering" | "toKeep" | "home" | "defend" | "toGarrison" | "garrisoned" | "toBarricade" | "buildingBarricade" | "moving" | "patrolling";
+  state:
+    | "idle"
+    | "toNode"
+    | "gathering"
+    | "toKeep"
+    | "home"
+    | "defend"
+    | "toGarrison"
+    | "garrisoned"
+    | "toBarricade"
+    | "buildingBarricade"
+    | "toRepair"
+    | "repairing"
+    | "moving"
+    | "patrolling";
   targetNodeId?: string;
   targetEnemyId?: number;
   targetBarricadeId?: number;
+  targetRepairBuildingId?: number;
+  targetRepairBarricadeId?: number;
+  targetRepairKeep?: boolean;
   moveTarget?: Vec2;
   patrolA?: Vec2;
   patrolB?: Vec2;
@@ -261,7 +278,7 @@ export interface CombatEvent {
 
 export interface CommandMarker {
   id: number;
-  kind: "move" | "gather" | "attack" | "patrol" | "rally" | "guard";
+  kind: "move" | "gather" | "attack" | "patrol" | "rally" | "guard" | "repair";
   pos: Vec2;
   life: number;
 }
@@ -502,6 +519,10 @@ export interface UiSnapshot {
   foeArmyCost: number;
   /** Peons standing idle or walking home with no job. */
   idlePeonCount: number;
+  /** Friendly buildings, built barricades, and keep currently below max HP. */
+  damagedStructureCount: number;
+  /** Friendly peons currently walking to repair or actively repairing structures. */
+  repairingPeonCount: number;
   keepGarrisoned: number;
   keepGarrisonMax: number;
   canTrainPeon: boolean;

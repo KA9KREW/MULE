@@ -199,9 +199,15 @@ export class GameRenderer {
   private guardRingCoreMat: THREE.MeshBasicMaterial;
   private targetRingGlowMat: THREE.MeshBasicMaterial;
   private targetRingCoreMat: THREE.MeshBasicMaterial;
+  private damageYellowGlowMat: THREE.MeshBasicMaterial;
+  private damageYellowCoreMat: THREE.MeshBasicMaterial;
+  private damageRedGlowMat: THREE.MeshBasicMaterial;
+  private damageRedCoreMat: THREE.MeshBasicMaterial;
   private unitSelRingPool: THREE.Group[] = [];
   private guardRingPool: THREE.Group[] = [];
   private targetRingPool: THREE.Group[] = [];
+  private damageYellowRingPool: THREE.Group[] = [];
+  private damageRedRingPool: THREE.Group[] = [];
   // Shared command marker geometries (prevent per-marker geometry leaks)
   private cmdRingGeo: THREE.RingGeometry;
   private cmdGuardOuterGeo: THREE.RingGeometry;
@@ -491,6 +497,44 @@ export class GameRenderer {
       toneMapped: false,
     });
 
+    // Shared materials for always-visible structure damage rings (yellow: slightly damaged, red: critically damaged).
+    this.damageYellowGlowMat = new THREE.MeshBasicMaterial({
+      color: 0xf4c842,
+      transparent: true,
+      opacity: 0.32,
+      side: THREE.DoubleSide,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    this.damageYellowCoreMat = new THREE.MeshBasicMaterial({
+      color: 0xf4c842,
+      transparent: true,
+      opacity: 0.9,
+      side: THREE.DoubleSide,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    this.damageRedGlowMat = new THREE.MeshBasicMaterial({
+      color: 0xe84848,
+      transparent: true,
+      opacity: 0.36,
+      side: THREE.DoubleSide,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    this.damageRedCoreMat = new THREE.MeshBasicMaterial({
+      color: 0xe84848,
+      transparent: true,
+      opacity: 0.94,
+      side: THREE.DoubleSide,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+
     // Shared geometries for command markers (material disposed cleanly on prune).
     this.cmdRingGeo = new THREE.RingGeometry(3.5, 5.0, 24);
     this.cmdRingGeo.rotateX(-Math.PI / 2);
@@ -513,6 +557,8 @@ export class GameRenderer {
     for (const r of this.unitSelRingPool) r.visible = false;
     for (const r of this.guardRingPool) r.visible = false;
     for (const r of this.targetRingPool) r.visible = false;
+    for (const r of this.damageYellowRingPool) r.visible = false;
+    for (const r of this.damageRedRingPool) r.visible = false;
     this.guardTetherLines.geometry.setDrawRange(0, 0);
     this.guardTetherLines.visible = false;
   }
@@ -1827,6 +1873,7 @@ export class GameRenderer {
     this.syncPads(state);
     this.syncNodes(state);
     this.syncBarricades(state);
+    this.syncStructureDamageRings(state);
     this.syncUnits(state);
     this.syncUnitTacticalViz(state);
     this.syncVillagers(state);
@@ -2509,7 +2556,7 @@ export class GameRenderer {
         y: v.pos.y,
         timer: v.attackTimer,
         fighting: v.state === "defend" && v.attackTimer > -0.35,
-        work: v.state === "gathering" || v.state === "buildingBarricade",
+        work: v.state === "gathering" || v.state === "buildingBarricade" || v.state === "repairing",
       });
     }
     this.prune("vil-", live);
@@ -2545,6 +2592,73 @@ export class GameRenderer {
       const extra = pool.pop()!;
       this.tacticalRingRoot.remove(extra);
     }
+  }
+
+  /**
+   * Always-visible pooled damage rings around every living damaged structure on both teams:
+   * - Yellow ring (`0.45 <= hp / maxHp < 0.999`): slightly damaged
+   * - Gently pulsing red ring (`hp / maxHp < 0.45`): critically damaged
+   */
+  private syncStructureDamageRings(state: GameState) {
+    let yellowCount = 0;
+    let redCount = 0;
+
+    const critWave = Math.sin(state.time * 4.6);
+    const critPulse = 1 + critWave * 0.045;
+    this.damageRedCoreMat.opacity = 0.82 + critWave * 0.14;
+    this.damageRedGlowMat.opacity = 0.28 + critWave * 0.1;
+
+    const placeDamageRing = (x: number, y: number, elev: number, radius: number, hp: number, maxHp: number) => {
+      if (hp <= 0 || maxHp <= 0) return;
+      const ratio = hp / maxHp;
+      if (ratio >= 0.999) return;
+      if (ratio < 0.45) {
+        const ring = this.obtainPooledRing(
+          this.damageRedRingPool,
+          this.damageRedGlowMat,
+          this.damageRedCoreMat,
+          18,
+          19,
+          redCount++,
+        );
+        ring.visible = true;
+        setPos3(ring, x, y, elev);
+        ring.scale.setScalar(radius * critPulse);
+      } else {
+        const ring = this.obtainPooledRing(
+          this.damageYellowRingPool,
+          this.damageYellowGlowMat,
+          this.damageYellowCoreMat,
+          18,
+          19,
+          yellowCount++,
+        );
+        ring.visible = true;
+        setPos3(ring, x, y, elev);
+        ring.scale.setScalar(radius);
+      }
+    };
+
+    for (const b of state.buildings) {
+      if (b.hp <= 0 || b.hp >= b.maxHp) continue;
+      placeDamageRing(b.pos.x, b.pos.y, 0.68, 22, b.hp, b.maxHp);
+    }
+
+    for (const bar of state.barricades) {
+      if (!bar.built || bar.hp <= 0 || bar.hp >= bar.maxHp) continue;
+      placeDamageRing(bar.pos.x, bar.pos.y, 0.68, 17, bar.hp, bar.maxHp);
+    }
+
+    if (!state.arena) {
+      for (const team of ["you", "foe"] as Team[]) {
+        const keep = state.keeps[team];
+        if (!keep || keep.hp <= 0 || keep.hp >= keep.maxHp) continue;
+        placeDamageRing(keep.pos.x, keep.pos.y, 0.72, 35.5, keep.hp, keep.maxHp);
+      }
+    }
+
+    this.finalizeRingPool(this.damageYellowRingPool, yellowCount);
+    this.finalizeRingPool(this.damageRedRingPool, redCount);
   }
 
   /**
@@ -2804,6 +2918,7 @@ export class GameRenderer {
           patrol: 0xe4bd67,
           rally: 0xffd475,
           guard: 0x18e8b0,
+          repair: 0x7ee898,
         };
         if (marker.kind === "guard") {
           // Expanding emerald/teal outer ring + inner hexagonal shield pulse.
@@ -2982,6 +3097,10 @@ export class GameRenderer {
     this.guardRingCoreMat.dispose();
     this.targetRingGlowMat.dispose();
     this.targetRingCoreMat.dispose();
+    this.damageYellowGlowMat.dispose();
+    this.damageYellowCoreMat.dispose();
+    this.damageRedGlowMat.dispose();
+    this.damageRedCoreMat.dispose();
     this.cmdRingGeo.dispose();
     this.cmdGuardOuterGeo.dispose();
     this.cmdGuardShieldGeo.dispose();
