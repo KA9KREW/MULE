@@ -474,6 +474,10 @@ button:disabled {
   border-color: #ffd475;
 }
 
+.tap-marker.repair {
+  border-color: #7ee898;
+}
+
 .tap-marker.select {
   border-color: #bfe4ff;
   width: 22px;
@@ -2964,6 +2968,20 @@ button,
 
 .work-pennant {
   background: linear-gradient(180deg, #7a2a38, #4c1420);
+}
+
+.repair-pennant {
+  background: linear-gradient(180deg, #2b6b4a, #194430);
+  color: #f4f9ec;
+}
+
+.repair-pennant span {
+  color: #9ff3b4;
+}
+
+.repair-pennant.repairing {
+  background: linear-gradient(180deg, #3a855c, #205239);
+  color: #ffffff;
 }
 
 .banner-stack .drag-mode {

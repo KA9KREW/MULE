@@ -25,6 +25,8 @@ export type RemoteOrder =
   | { t: "gather"; team: Team; ids: number[]; nodeId: string }
   | { t: "recall"; team: Team }
   | { t: "work"; team: Team }
+  | { t: "repair"; team: Team }
+  | { t: "repairTarget"; team: Team; ids: number[]; buildingId?: number; barricadeId?: number; keep?: boolean }
   | { t: "build"; team: Team; kind: BuildingKind; padId: string }
   | { t: "train"; team: Team; kind: TrainKind; buildingId: number }
   | { t: "peon"; team: Team }
@@ -105,6 +107,9 @@ export interface SnapVillager {
   nodeId?: string;
   enemyId?: number;
   barricadeId?: number;
+  repairBuildingId?: number;
+  repairBarricadeId?: number;
+  repairKeep?: boolean;
   mx?: number;
   my?: number;
   ax?: number;
@@ -254,6 +259,8 @@ const ORDER_TYPES = new Set<RemoteOrder["t"]>([
   "gather",
   "recall",
   "work",
+  "repair",
+  "repairTarget",
   "build",
   "train",
   "peon",

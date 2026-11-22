@@ -9,7 +9,7 @@ import {
 } from "./game/render3d";
 import { GameSim, hitTest } from "./game/sim";
 import type { BuildingKind, CombatEventKind, RectHit, TrainKind, UiSnapshot } from "./game/types";
-import { BUILD_COST } from "./game/balance";
+import { BASE_ARMY_CAP, BUILD_COST } from "./game/balance";
 import { Hud } from "./ui/Hud";
 import { BuildBar } from "./ui/BuildBar";
 import { DetailSheet } from "./ui/DetailSheet";
@@ -77,10 +77,12 @@ const defaultUi: UiSnapshot = {
   peonCount: 2,
   peonCap: 2,
   armyCount: 0,
-  armyCap: 25,
+  armyCap: BASE_ARMY_CAP,
   armyCost: 0,
   foeArmyCost: 0,
   idlePeonCount: 0,
+  damagedStructureCount: 0,
+  repairingPeonCount: 0,
   keepGarrisoned: 0,
   keepGarrisonMax: 5,
   canTrainPeon: false,
@@ -170,7 +172,7 @@ interface TapMarker {
   id: number;
   x: number;
   y: number;
-  kind: "move" | "gather" | "attack" | "patrol" | "select" | "build";
+  kind: "move" | "gather" | "attack" | "patrol" | "select" | "build" | "repair";
   label: string;
 }
 
@@ -509,24 +511,41 @@ export default function App() {
 
   /** Shared contextual order used by right-click (mouse) and tap-with-selection (touch). */
   const issueOrder = useCallback(
-    (world: { x: number; y: number }, hit: RectHit | null, localX: number, localY: number) => {
+    (world: { x: number; y: number }, hit: ScreenPickHit | null, localX: number, localY: number) => {
       const state = sim.getState();
       if (state.buildSelection) {
-        sim.click(hit, world);
+        sim.click(hit && hit.kind !== "barricade" ? hit : null, world);
         pushTapMarker(localX, localY, "build", "Place");
       } else {
         const patrol = patrolModeRef.current;
         const hadPeons = state.selectedVillagerIds.length > 0;
+        const repairHit = !patrol && hadPeons && sim.isDamagedFriendlyHit(hit, sim.getLocalTeam());
         sim.commandSelected(world, hit, patrol);
         if (hadPeons) {
-          const kind: TapMarker["kind"] =
-            hit?.kind === "node" ? "gather" : hit?.kind === "unit" ? "attack" : patrol ? "patrol" : "move";
-          const label = kind === "gather" ? "Gather" : kind === "attack" ? "Attack" : kind === "patrol" ? "Patrol" : "Move";
+          const kind: TapMarker["kind"] = repairHit
+            ? "repair"
+            : hit?.kind === "node"
+              ? "gather"
+              : hit?.kind === "unit"
+                ? "attack"
+                : patrol
+                  ? "patrol"
+                  : "move";
+          const label =
+            kind === "repair"
+              ? "Repair"
+              : kind === "gather"
+                ? "Gather"
+                : kind === "attack"
+                  ? "Attack"
+                  : kind === "patrol"
+                    ? "Patrol"
+                    : "Move";
           pushTapMarker(localX, localY, kind, label);
         }
       }
       setPatrol(false);
-      beep(hit?.kind === "node" ? 520 : 370, 0.045);
+      beep(hit?.kind === "node" ? 520 : sim.isDamagedFriendlyHit(hit, sim.getLocalTeam()) ? 490 : 370, 0.045);
       refreshUi();
     },
     // beep is stable enough for this purpose; it only reads refs/sim.
@@ -785,7 +804,11 @@ export default function App() {
           issueArmyOrder(world, targetHit, p.x, p.y);
           return;
         }
-        issueOrder(world, hit, p.x, p.y);
+        const peonHit: ScreenPickHit | null =
+          !state.buildSelection && state.selectedVillagerIds.length > 0
+            ? (r.pickTargetAt(state, p.x, p.y) ?? hit)
+            : hit;
+        issueOrder(world, peonHit, p.x, p.y);
         return;
       }
 
@@ -846,10 +869,17 @@ export default function App() {
           issueArmyOrder(world, targetHit, p.x, p.y);
           return;
         }
-        if (!state.buildSelection && peonsSelected && !ownPeon && !ownStructure) {
-          // Tap-to-order: ground → move, tree/mine → gather, enemy → attack.
-          issueOrder(world, hit, p.x, p.y);
-          return;
+        if (!state.buildSelection && peonsSelected && !ownPeon) {
+          const targetHit: ScreenPickHit | null = r.pickTargetAt(state, p.x, p.y) ?? hit;
+          if (sim.isDamagedFriendlyHit(targetHit, localTeam)) {
+            issueOrder(world, targetHit, p.x, p.y);
+            return;
+          }
+          if (!ownStructure) {
+            // Tap-to-order: ground → move, tree/mine → gather, enemy → attack.
+            issueOrder(world, hit, p.x, p.y);
+            return;
+          }
         }
       }
 
@@ -1499,7 +1529,14 @@ export default function App() {
     for (const layer of ui.defendLayers) {
       clusterActions.push({
         id: `defend-${layer.id}`,
-        icon: layer.id === "assault" ? "⚔" : layer.id === "keep" ? "🛡" : "🌉",
+        icon:
+          layer.id === "assault"
+            ? "⚔"
+            : layer.id === "keep"
+              ? "🛡"
+              : layer.label === "Hold midground"
+                ? "⚑"
+                : "🌉",
         label: layer.label,
         hint:
           layer.id === "assault"
@@ -1642,6 +1679,19 @@ export default function App() {
           issueOrder(world, null, x, y);
         },
       });
+      if (sim.isDamagedFriendlyHit(radial.targetHit ?? hit, sim.getLocalTeam())) {
+        const repairTarget = radial.targetHit ?? hit;
+        radialItems.push({
+          id: "repair",
+          icon: "🔧",
+          label: "Repair",
+          tone: "gather",
+          onPress: () => {
+            setPatrol(false);
+            issueOrder(world, repairTarget, x, y);
+          },
+        });
+      }
       if (hit?.kind === "node") {
         radialItems.push({
           id: "gather",
@@ -1970,6 +2020,30 @@ export default function App() {
           )}
           {showCommandRail && (
           <div className="banner-rail">
+            {!ui.arena && ui.damagedStructureCount > 0 && ui.peonCount > 0 && (
+              <button
+                type="button"
+                className={`pennant repair-pennant${ui.repairingPeonCount > 0 ? " repairing" : ""}`}
+                aria-label={
+                  ui.repairingPeonCount > 0
+                    ? `${ui.repairingPeonCount} peon${ui.repairingPeonCount === 1 ? "" : "s"} repairing ${ui.damagedStructureCount} damaged structure${ui.damagedStructureCount === 1 ? "" : "s"}. Click to assign more.`
+                    : `Send peons to repair ${ui.damagedStructureCount} damaged structure${ui.damagedStructureCount === 1 ? "" : "s"}`
+                }
+                title={
+                  ui.repairingPeonCount > 0
+                    ? `${ui.repairingPeonCount} peon${ui.repairingPeonCount === 1 ? "" : "s"} repairing — click to assign more peons`
+                    : `Send peons to repair ${ui.damagedStructureCount} damaged structure${ui.damagedStructureCount === 1 ? "" : "s"} (auto-returns to work)`
+                }
+                onClick={() => {
+                  sim.sendPeonsToRepair(sim.getLocalTeam());
+                  refreshUi();
+                  beep(460);
+                }}
+              >
+                {ui.repairingPeonCount > 0 ? "Repairing…" : "Repair"}
+                <span>{ui.damagedStructureCount}</span>
+              </button>
+            )}
             {!ui.arena && ui.idlePeonCount > 0 && (
               <button
                 type="button"
