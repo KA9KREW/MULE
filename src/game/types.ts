@@ -1,8 +1,10 @@
 export type Team = "you" | "foe";
 export type WaveUnitKind = "raider" | "soldier" | "brute" | "runner" | "ward";
 export type TrainKind = "levy" | "runner" | "archer" | "ward" | "rammer" | "trebuchet" | "spy";
+/** Trained at an upgraded keep. Not a barracks train kind. */
+export type KeepTrainKind = "raider" | "brute";
 export type SiegePhase = "packed" | "unpacking" | "ready" | "packing";
-/** Church-only knight; not train-queueable from barracks. Arena starter uses peon. */
+/** Templars queue at a cathedral, not at barracks. Arena starter uses peon. */
 export type UnitKind = WaveUnitKind | TrainKind | "templar" | "peon";
 export type BuildingKind = "watchtower" | "ballista" | "catapult" | "barracks" | "church" | "house" | "barricade";
 export type ResourceKind = "pine" | "copper";
@@ -37,6 +39,10 @@ export interface Keep {
   attackFlash: number;
   attackTarget?: Vec2;
   peonQueue: PeonJob[];
+  /** Paid upgrade (1000 gold, 1000 wood). Unlocks raider and brute training. */
+  upgraded: boolean;
+  /** Raider and brute jobs. Only filled after the keep is upgraded. */
+  troopQueue: KeepTrainJob[];
 }
 
 export interface Unit {
@@ -138,6 +144,18 @@ export interface TrainJob {
   totalTime: number;
 }
 
+export interface KeepTrainJob {
+  kind: KeepTrainKind;
+  timeLeft: number;
+  totalTime: number;
+}
+
+/** Paid templar job at a cathedral. The unit kind is always templar. */
+export interface TemplarJob {
+  timeLeft: number;
+  totalTime: number;
+}
+
 export interface Building {
   id: number;
   team: Team;
@@ -158,10 +176,14 @@ export interface Building {
   rallyPoint?: Vec2;
   /** Spy sabotage. Gun stays silent while this is above zero. */
   disableTimer?: number;
-  /** Church: seconds until the next free levy. */
+  /** Church: seconds until the next free soldier. */
   churchLevyTimer?: number;
   /** Church: seconds until the next free templar. */
   churchTemplarTimer?: number;
+  /** Church raised to a cathedral after that team's keep is upgraded. */
+  cathedral?: boolean;
+  /** Paid templar jobs. Only a cathedral fills this. */
+  templarQueue?: TemplarJob[];
 }
 
 export interface Pad {
@@ -358,6 +380,8 @@ export interface GameState {
   wavesCleared: number;
   buildSelection: BuildingKind | null;
   selectedBuildingId: number | null;
+  /** Friendly barracks selected together. Empty unless the selection is that player's barracks. */
+  selectedBuildingIds: number[];
   selectedVillagerIds: number[];
   /** Selected friendly barracks units (AoE2 individual / group selection). */
   selectedUnitIds: number[];
@@ -436,9 +460,21 @@ export interface ArenaStandingUi {
 }
 
 export interface QueueSlotUi {
-  kind: TrainKind;
+  kind: TrainKind | KeepTrainKind | "templar";
   label: string;
   pct: number;
+  /** Barracks that owns this slot when several barracks are selected. */
+  buildingId?: number;
+  /** Index in that barracks' queue. Omitted when a single barracks is selected. */
+  queueIndex?: number;
+}
+
+export interface KeepTrainOptionUi {
+  kind: KeepTrainKind;
+  label: string;
+  blurb: string;
+  cost: number;
+  woodCost: number;
 }
 
 export interface TrainOptionUi {
@@ -492,6 +528,8 @@ export interface UiSnapshot {
   selectedBuildingId: number | null;
   selectedBuildingTeam: Team | null;
   selectedBuildingKind: BuildingKind | null;
+  /** Living friendly barracks in the current selection. */
+  selectedBarracksCount: number;
   selectedKeepTeam: Team | null;
   selectedPeonCount: number;
   selectedArmy: SelectedArmyUi | null;
@@ -527,6 +565,21 @@ export interface UiSnapshot {
   keepGarrisonMax: number;
   canTrainPeon: boolean;
   peonTrainCost: { gold: number; wood: number };
+  /** Local team's keep has paid for the upgrade. */
+  keepUpgraded: boolean;
+  /** Own keep is selected and is not upgraded yet. */
+  canUpgradeKeep: boolean;
+  keepUpgradeCost: { gold: number; wood: number };
+  /** Empty until the selected keep is upgraded. */
+  keepTrainOptions: KeepTrainOptionUi[];
+  keepTroopQueue: QueueSlotUi[];
+  /** Selected church has been raised to a cathedral. */
+  selectedIsCathedral: boolean;
+  /** Own church, keep already upgraded, not yet a cathedral, and the player can pay. */
+  selectedCanRaiseCathedral: boolean;
+  cathedralUpgradeCost: { gold: number; wood: number };
+  templarTrainCost: { gold: number; wood: number };
+  templarQueue: QueueSlotUi[];
   buildCosts: Record<BuildingKind, { gold: number; wood: number }>;
   keepLevel: number;
   keepXp: number;

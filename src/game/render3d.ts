@@ -209,6 +209,7 @@ export class GameRenderer {
   private damageRedGlowMat: THREE.MeshBasicMaterial;
   private damageRedCoreMat: THREE.MeshBasicMaterial;
   private unitSelRingPool: THREE.Group[] = [];
+  private barracksSelRingPool: THREE.Group[] = [];
   private guardRingPool: THREE.Group[] = [];
   private targetRingPool: THREE.Group[] = [];
   private damageYellowRingPool: THREE.Group[] = [];
@@ -2022,6 +2023,7 @@ export class GameRenderer {
     this.syncStructureDamageRings(state);
     this.syncUnits(state);
     this.syncUnitTacticalViz(state);
+    this.syncBarracksSelectionRings(state);
     this.syncVillagers(state);
     this.syncCommandViz(state);
     this.updateAnimations(step);
@@ -2145,6 +2147,8 @@ export class GameRenderer {
       const obj = this.ensure(key, () => this.makeKeep(team));
       const k = state.keeps[team];
       setPos3(obj, k.pos.x, k.pos.y, 0);
+      const crown = obj.getObjectByName("upgrade-mark");
+      if (crown) crown.visible = k.upgraded;
       if (k.hitFlash > 0) obj.scale.setScalar(1.04);
       else obj.scale.setScalar(1);
     }
@@ -2198,6 +2202,8 @@ export class GameRenderer {
       }
       setPos3(obj, b.pos.x, b.pos.y, 0);
       if (b.kind === "church") {
+        const spire = obj.getObjectByName("cathedral-mark");
+        if (spire) spire.visible = b.cathedral === true;
         let ring = obj.userData.auraRing as THREE.Mesh | undefined;
         if (!ring) {
           ring = new THREE.Mesh(
@@ -2346,7 +2352,7 @@ export class GameRenderer {
     this.prune("pad-", live);
   }
 
-  private resourceBeacon(label: string, color: number) {
+  private resourceBeacon(color: number) {
     const g = new THREE.Group();
     g.name = "beacon";
     const ring = new THREE.Mesh(
@@ -2364,26 +2370,6 @@ export class GameRenderer {
     beam.position.y = 16;
     beam.name = "beam";
     g.add(beam);
-    const canvas = document.createElement("canvas");
-    canvas.width = 256;
-    canvas.height = 64;
-    const ctx = canvas.getContext("2d")!;
-    ctx.fillStyle = "#1a1208";
-    ctx.fillRect(8, 8, 240, 48);
-    ctx.strokeStyle = `#${color.toString(16).padStart(6, "0")}`;
-    ctx.lineWidth = 6;
-    ctx.strokeRect(8, 8, 240, 48);
-    ctx.fillStyle = "#fff6d8";
-    ctx.font = "bold 36px Georgia";
-    ctx.textAlign = "center";
-    ctx.fillText(label, 128, 44);
-    const spr = new THREE.Sprite(
-      new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true, depthTest: false }),
-    );
-    spr.scale.set(22, 5.5, 1);
-    spr.position.y = 34;
-    spr.name = "label";
-    g.add(spr);
     return g;
   }
 
@@ -2396,7 +2382,6 @@ export class GameRenderer {
         const g = this.makeNode(n);
         g.userData.canopy = g.getObjectByName("canopy") ?? null;
         g.userData.beam = g.getObjectByName("beam") ?? null;
-        g.userData.label = g.getObjectByName("label") ?? null;
         g.userData.marker = g.getObjectByName("marker") ?? null;
         return g;
       });
@@ -2406,8 +2391,6 @@ export class GameRenderer {
       if (canopy) canopy.visible = alive;
       const beam = obj.userData.beam as THREE.Object3D | null;
       if (beam) beam.visible = alive;
-      const label = obj.userData.label as THREE.Object3D | null;
-      if (label) label.visible = alive;
       const marker = obj.userData.marker as THREE.Mesh | null;
       if (marker?.material instanceof THREE.MeshBasicMaterial) {
         marker.material.opacity = alive ? 0.55 + Math.sin(state.time * 4 + n.pos.x) * 0.3 : 0.12;
@@ -2430,17 +2413,13 @@ export class GameRenderer {
         logs.name = "logs";
         g.add(logs);
       }
-      g.add(
-        this.resourceBeacon(own ? "WOOD" : "RAID WOOD", own ? 0xf0c040 : 0xff704f),
-      );
+      g.add(this.resourceBeacon(own ? 0xf0c040 : 0xff704f));
     } else {
       const rocks = new THREE.Group();
       rocks.name = "canopy";
       rocks.add(buildGoldMine());
       g.add(rocks);
-      g.add(
-        this.resourceBeacon(own ? "GOLD" : "RAID GOLD", own ? 0x4aa0ff : 0xff704f),
-      );
+      g.add(this.resourceBeacon(own ? 0x4aa0ff : 0xff704f));
     }
     return g;
   }
@@ -3157,6 +3136,28 @@ export class GameRenderer {
     );
     ring.rotation.x = -Math.PI / 2;
     return ring;
+  }
+
+  /** Gold rings under every selected friendly barracks. */
+  private syncBarracksSelectionRings(state: GameState) {
+    const wanted = new Set(state.selectedBuildingIds ?? []);
+    if (state.selectedBuildingId != null) wanted.add(state.selectedBuildingId);
+    let count = 0;
+    for (const b of state.buildings) {
+      if (!wanted.has(b.id) || b.kind !== "barracks" || b.hp <= 0 || b.team !== state.commandTeam) continue;
+      const ring = this.obtainPooledRing(
+        this.barracksSelRingPool,
+        this.unitSelGlowMat,
+        this.unitSelCoreMat,
+        20,
+        21,
+        count++,
+      );
+      ring.visible = true;
+      setPos3(ring, b.pos.x, b.pos.y, 0.9);
+      ring.scale.setScalar(18);
+    }
+    this.finalizeRingPool(this.barracksSelRingPool, count);
   }
 
   private syncSelectionRing(state: GameState) {

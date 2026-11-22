@@ -5,6 +5,7 @@ import type {
   GamePhase,
   Lane,
   MapDef,
+  KeepTrainKind,
   Team,
   SiegePhase,
   TrainKind,
@@ -28,6 +29,10 @@ export type RemoteOrder =
   | { t: "repair"; team: Team }
   | { t: "repairTarget"; team: Team; ids: number[]; buildingId?: number; barricadeId?: number; keep?: boolean }
   | { t: "build"; team: Team; kind: BuildingKind; padId: string }
+  /**
+   * `buildingId` is chosen by the player who queued the unit (shortest selected
+   * barracks queue; lowest id on a tie). The host applies that id and does not pick again.
+   */
   | { t: "train"; team: Team; kind: TrainKind; buildingId: number }
   | { t: "peon"; team: Team }
   | { t: "garrison"; team: Team }
@@ -37,6 +42,12 @@ export type RemoteOrder =
   | { t: "upgrade"; team: Team; buildingId: number; kind: "damage" | "rate" }
   | { t: "raze"; team: Team; buildingId: number }
   | { t: "church"; team: Team; buildingId: number }
+  | { t: "keepUpgrade"; team: Team }
+  | { t: "keepTrain"; team: Team; kind: KeepTrainKind }
+  | { t: "cancelKeep"; team: Team; index: number }
+  | { t: "cathedral"; team: Team; buildingId: number }
+  | { t: "templar"; team: Team; buildingId: number }
+  | { t: "cancelTemplar"; team: Team; buildingId: number; index: number }
   | { t: "cancel"; team: Team; buildingId: number; index: number }
   | { t: "pause" }
   | { t: "speed" }
@@ -67,6 +78,9 @@ export interface SnapKeep {
   hitFlash: number;
   attackFlash: number;
   queue: { timeLeft: number; totalTime: number }[];
+  /** Absent on older pictures; treat missing as not upgraded. */
+  upgraded?: boolean;
+  troopQueue?: { kind: KeepTrainKind; timeLeft: number; totalTime: number }[];
 }
 
 export interface SnapUnit {
@@ -142,6 +156,8 @@ export interface SnapBuilding {
   disableTimer?: number;
   churchLevyTimer?: number;
   churchTemplarTimer?: number;
+  cathedral?: boolean;
+  templarQueue?: { timeLeft: number; totalTime: number }[];
 }
 
 export interface SnapNode {
@@ -271,6 +287,12 @@ const ORDER_TYPES = new Set<RemoteOrder["t"]>([
   "upgrade",
   "raze",
   "church",
+  "keepUpgrade",
+  "keepTrain",
+  "cancelKeep",
+  "cathedral",
+  "templar",
+  "cancelTemplar",
   "cancel",
   "pause",
   "speed",

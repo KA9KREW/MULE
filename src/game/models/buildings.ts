@@ -393,5 +393,24 @@ export function buildChurchModel(team: Team) {
   const arm = new THREE.Mesh(new THREE.BoxGeometry(12, 1.4, 1.4), crossMat);
   arm.position.set(0, 38, 0);
   g.add(mast, arm);
+  // Hidden until this church is raised to a cathedral. Taller than the rooftop cross.
+  const mark = new THREE.Group();
+  mark.name = "cathedral-mark";
+  mark.visible = false;
+  const gold = new THREE.MeshStandardMaterial({
+    color: 0xf2d56a,
+    metalness: 0.6,
+    roughness: 0.3,
+    emissive: 0x8a6a14,
+    emissiveIntensity: 0.4,
+  });
+  const collar = new THREE.Mesh(new THREE.CylinderGeometry(1.3, 1.6, 2.2, 8), gold);
+  collar.position.set(0, 42.2, 0);
+  const spire = new THREE.Mesh(new THREE.ConeGeometry(2.4, 18, 8), gold);
+  spire.position.set(0, 52, 0);
+  const flag = banner(team, 7);
+  flag.position.set(6, 36, 0);
+  mark.add(collar, spire, flag);
+  g.add(mark);
   return finish(g);
 }

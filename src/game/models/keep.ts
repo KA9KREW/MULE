@@ -106,6 +106,32 @@ export function buildKeepModel(team: Team) {
     g.add(b);
   }
 
+  // Hidden until the keep is upgraded. Sits above the donjon hip, clear of the stair banner.
+  const crown = new THREE.Group();
+  crown.name = "upgrade-mark";
+  crown.visible = false;
+  const gold = new THREE.MeshStandardMaterial({
+    color: 0xf3d36a,
+    metalness: 0.7,
+    roughness: 0.25,
+    emissive: 0xb8860b,
+    emissiveIntensity: 0.45,
+  });
+  const circlet = new THREE.Mesh(new THREE.TorusGeometry(3.4, 0.42, 8, 18), gold);
+  circlet.rotation.x = Math.PI / 2;
+  circlet.position.set(-1, baseY + donH + 20.2, -2);
+  crown.add(circlet);
+  for (let i = 0; i < 5; i++) {
+    const a = (i / 5) * Math.PI * 2;
+    const point = new THREE.Mesh(new THREE.ConeGeometry(0.55, 2.2, 5), gold);
+    point.position.set(-1 + Math.cos(a) * 3.1, baseY + donH + 21.6, -2 + Math.sin(a) * 3.1);
+    crown.add(point);
+  }
+  const royal = banner(team, 6);
+  royal.position.set(-1, baseY + donH + 22, -2);
+  crown.add(royal);
+  g.add(crown);
+
   g.traverse((o) => {
     if ((o as THREE.Mesh).isMesh) o.castShadow = true;
   });

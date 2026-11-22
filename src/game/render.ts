@@ -547,7 +547,7 @@ export class GameRenderer {
   private drawBuilding3d(ctx: CanvasRenderingContext2D, b: Building, state: GameState) {
     const { x, y } = b.pos;
     const team = b.team;
-    const selected = b.id === state.selectedBuildingId;
+    const selected = b.id === state.selectedBuildingId || state.selectedBuildingIds.includes(b.id);
     const isStarter = !b.canRefund && b.kind === "watchtower";
     this.shadow(ctx, x, y + 8, 16, 6, 0.4);
 

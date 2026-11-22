@@ -58,6 +58,7 @@ const defaultUi: UiSnapshot = {
   selectedBuildingId: null,
   selectedBuildingTeam: null,
   selectedBuildingKind: null,
+  selectedBarracksCount: 0,
   selectedKeepTeam: null,
   selectedPeonCount: 0,
   selectedArmy: null,
@@ -87,6 +88,16 @@ const defaultUi: UiSnapshot = {
   keepGarrisonMax: 5,
   canTrainPeon: false,
   peonTrainCost: { gold: 18, wood: 0 },
+  keepUpgraded: false,
+  canUpgradeKeep: false,
+  keepUpgradeCost: { gold: 0, wood: 0 },
+  keepTrainOptions: [],
+  keepTroopQueue: [],
+  selectedIsCathedral: false,
+  selectedCanRaiseCathedral: false,
+  cathedralUpgradeCost: { gold: 0, wood: 0 },
+  templarTrainCost: { gold: 0, wood: 0 },
+  templarQueue: [],
   buildCosts: BUILD_COST,
   keepLevel: 1,
   keepXp: 0,
@@ -215,6 +226,8 @@ export default function App() {
   const shiftClickStartRef = useRef<{ x: number; y: number } | null>(null);
   const lastUnitClickRef = useRef<{ id: number; at: number } | null>(null);
   const lastUnitDblClickAtRef = useRef(0);
+  const lastBarracksClickRef = useRef<{ id: number; at: number } | null>(null);
+  const lastBarracksDblClickAtRef = useRef(0);
   const patrolModeRef = useRef(false);
   const armyPatrolModeRef = useRef(false);
   const selectionBoxRef = useRef<{ left: number; top: number; width: number; height: number } | null>(null);
@@ -775,6 +788,7 @@ export default function App() {
         setArmyPatrol(false);
         setPatrol(false);
         lastUnitClickRef.current = null;
+        lastBarracksClickRef.current = null;
         refreshUi();
         setSelectionBox(null);
         selectionBoxRef.current = null;
@@ -835,6 +849,7 @@ export default function App() {
             )
           : undefined;
       if (clickedFriendlyUnit) {
+        lastBarracksClickRef.current = null;
         const additive = ev.shiftKey || ev.ctrlKey || ev.metaKey;
         const now = performance.now();
         const prev = lastUnitClickRef.current;
@@ -848,6 +863,39 @@ export default function App() {
         } else {
           lastUnitClickRef.current = { id: clickedFriendlyUnit.id, at: now };
           sim.selectUnit(clickedFriendlyUnit.id, additive);
+          pushTapMarker(p.x, p.y, "select", "");
+          beep(360, 0.04);
+        }
+        setArmyPatrol(false);
+        setPatrol(false);
+        refreshUi();
+        return;
+      }
+
+      // Left-click / tap a friendly barracks → same double-click timing as soldiers, but every living barracks on the map.
+      const clickedFriendlyBarracks =
+        state.phase === "running" &&
+        !state.buildSelection &&
+        hit?.kind === "building" &&
+        (touch || ev.button === 0)
+          ? state.buildings.find(
+              (b) => b.id === Number(hit.id) && b.team === localTeam && b.kind === "barracks" && b.hp > 0,
+            )
+          : undefined;
+      if (clickedFriendlyBarracks) {
+        const additive = ev.shiftKey || ev.ctrlKey || ev.metaKey;
+        const now = performance.now();
+        const prev = lastBarracksClickRef.current;
+        lastUnitClickRef.current = null;
+        if (prev && prev.id === clickedFriendlyBarracks.id && now - prev.at <= 380) {
+          lastBarracksClickRef.current = null;
+          lastBarracksDblClickAtRef.current = now;
+          sim.selectAllFriendlyBarracks(additive, clickedFriendlyBarracks.id);
+          pushTapMarker(p.x, p.y, "select", "");
+          beep(460, 0.05);
+        } else {
+          lastBarracksClickRef.current = { id: clickedFriendlyBarracks.id, at: now };
+          sim.selectBuilding(clickedFriendlyBarracks.id, additive);
           pushTapMarker(p.x, p.y, "select", "");
           beep(360, 0.04);
         }
@@ -887,6 +935,7 @@ export default function App() {
       if (isShiftTap && !hit) return;
 
       lastUnitClickRef.current = null;
+      lastBarracksClickRef.current = null;
       if (
         !state.buildSelection &&
         (!hit || hit.kind === "villager" || hit.kind === "keep" || hit.kind === "building")
@@ -909,6 +958,7 @@ export default function App() {
       if (!r || document.pointerLockElement === canvas) return;
       // Do not trigger camera focus-on-ground when a friendly barracks unit was just double-clicked.
       if (performance.now() - lastUnitDblClickAtRef.current < 160) return;
+      if (performance.now() - lastBarracksDblClickAtRef.current < 160) return;
       const rect = canvas.getBoundingClientRect();
       const sx = ev.clientX - rect.left;
       const sy = ev.clientY - rect.top;
@@ -2136,9 +2186,40 @@ export default function App() {
               refreshUi();
               beep(480);
             }}
+            onUpgradeKeep={() => {
+              sim.upgradeSelectedKeep();
+              refreshUi();
+              beep(520);
+            }}
+            onEnqueueKeep={(kind) => {
+              sim.enqueueKeepTrain(kind);
+              refreshUi();
+              beep(340);
+            }}
+            onCancelKeepQueue={(i) => {
+              sim.cancelKeepTroop(i);
+              refreshUi();
+              beep(200);
+            }}
+            onRaiseCathedral={() => {
+              sim.raiseSelectedCathedral();
+              refreshUi();
+              beep(500);
+            }}
+            onEnqueueTemplar={() => {
+              sim.enqueueTemplar();
+              refreshUi();
+              beep(360);
+            }}
+            onCancelTemplar={(i) => {
+              sim.cancelTemplarSlot(i);
+              refreshUi();
+              beep(200);
+            }}
             onEnqueue={onEnqueue}
             onCancelQueue={(i) => {
-              sim.cancelQueueSlot(i);
+              const slot = ui.trainQueue[i];
+              sim.cancelQueueSlot(slot?.queueIndex ?? i, slot?.buildingId);
               refreshUi();
               beep(200);
             }}

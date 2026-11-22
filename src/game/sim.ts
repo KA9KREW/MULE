@@ -17,9 +17,13 @@ import {
   CHURCH_AURA_DAMAGE,
   CHURCH_AURA_RANGE,
   CHURCH_AURA_REGEN,
+  CATHEDRAL_UPGRADE_GOLD,
+  CATHEDRAL_UPGRADE_WOOD,
   CHURCH_LEVY_INTERVAL,
   CHURCH_TEMPLAR_INTERVAL,
   CHURCH_UPGRADE_GOLD,
+  KEEP_UPGRADE_GOLD,
+  KEEP_UPGRADE_WOOD,
   isWardKind,
   CATAPULT_SPLASH_RADIUS,
   CATAPULT_VS_BARRICADE,
@@ -168,6 +172,7 @@ import type {
   BuildingKind,
   DefendLayerId,
   GameState,
+  KeepTrainKind,
   Lane,
   MapDef,
   Pad,
@@ -267,6 +272,8 @@ export class GameSim {
   private applyingRemote = false;
   /** Pad the local player just ordered. The next picture selects that building. */
   private pendingOwnPad: string | null = null;
+  /** Train orders already sent to the host and not yet in a snapshot, per barracks. */
+  private pendingTrain = new Map<number, number>();
   private linkDown = false;
   private shownMap: { id: string; name: string; tagline: string; seed: number } | null = null;
   private poses = new Map<string, Pose>();
@@ -300,6 +307,7 @@ export class GameSim {
   }
 
   private makeFreshState(map: MapDef): GameState {
+    this.pendingTrain.clear();
     this.repairCostAcc = { you: { gold: 0, wood: 0 }, foe: { gold: 0, wood: 0 } };
     this.repairPulseHp.clear();
     const meta = loadMeta();
@@ -392,6 +400,8 @@ export class GameSim {
           attackTimer: 0,
           attackFlash: 0,
           peonQueue: [],
+          upgraded: false,
+          troopQueue: [],
         },
         foe: {
           team: "foe",
@@ -402,6 +412,8 @@ export class GameSim {
           attackTimer: 0,
           attackFlash: 0,
           peonQueue: [],
+          upgraded: false,
+          troopQueue: [],
         },
       },
       gold: { you: stash.gold, foe: stash.gold },
@@ -422,6 +434,7 @@ export class GameSim {
       wavesCleared: 0,
       buildSelection: null,
       selectedBuildingId: null,
+      selectedBuildingIds: [],
       selectedVillagerIds: [],
       selectedUnitIds: [],
       selectedKeepTeam: null,
@@ -860,6 +873,7 @@ export class GameSim {
 
   setOrderSink(sink: ((order: RemoteOrder) => void) | null) {
     this.orderSink = sink;
+    this.pendingTrain.clear();
   }
 
   setRemoteNote(note: ((text: string) => void) | null) {
@@ -1775,7 +1789,7 @@ export class GameSim {
 
   selectBuild(kind: BuildingKind | null) {
     this.state.buildSelection = kind;
-    this.state.selectedBuildingId = null;
+    this.setBuildingSelection(null);
     this.state.selectedVillagerIds = [];
     this.state.selectedUnitIds = [];
     this.state.selectedKeepTeam = null;
@@ -1783,7 +1797,7 @@ export class GameSim {
 
   cancelSelection() {
     this.state.buildSelection = null;
-    this.state.selectedBuildingId = null;
+    this.setBuildingSelection(null);
     this.state.selectedVillagerIds = [];
     this.state.selectedUnitIds = [];
     this.state.selectedKeepTeam = null;
@@ -1796,7 +1810,7 @@ export class GameSim {
       return;
     }
     if (!hit) {
-      this.state.selectedBuildingId = null;
+      this.setBuildingSelection(null);
       this.state.selectedVillagerIds = [];
       this.state.selectedUnitIds = [];
       this.state.selectedKeepTeam = null;
@@ -1807,7 +1821,7 @@ export class GameSim {
       const peon = this.state.villagers.find((v) => v.id === id && v.team === this.localTeam && v.hp > 0);
       this.state.selectedVillagerIds = peon ? [peon.id] : [];
       this.state.selectedUnitIds = [];
-      this.state.selectedBuildingId = null;
+      this.setBuildingSelection(null);
       this.state.selectedKeepTeam = null;
       return;
     }
@@ -1827,7 +1841,7 @@ export class GameSim {
     if (hit.kind === "keep" && hit.id === this.localTeam) {
       // Select keep for peon training (double-purpose: also home call via button later)
       this.state.selectedKeepTeam = this.localTeam;
-      this.state.selectedBuildingId = null;
+      this.setBuildingSelection(null);
       this.state.selectedVillagerIds = [];
       this.state.selectedUnitIds = [];
       this.state.buildSelection = null;
@@ -1839,12 +1853,110 @@ export class GameSim {
     }
     if (hit.kind === "building") {
       const id = Number(hit.id);
-      this.state.selectedBuildingId = Number.isNaN(id) ? null : id;
+      if (!Number.isNaN(id) && this.selectBuilding(id, false)) return;
       this.state.selectedVillagerIds = [];
       this.state.selectedUnitIds = [];
       this.state.selectedKeepTeam = null;
       this.state.buildSelection = null;
+      this.setBuildingSelection(Number.isNaN(id) ? null : id);
     }
+  }
+
+  /**
+   * Select one building. Shift/ctrl on a friendly barracks adds or removes it.
+   * A normal click selects only that building.
+   */
+  selectBuilding(id: number, additive = false): boolean {
+    const b = this.state.buildings.find((x) => x.id === id && x.hp > 0);
+    if (!b) return false;
+    const ownBarracks = b.team === this.localTeam && b.kind === "barracks";
+    if (additive && ownBarracks) {
+      const current = this.livingSelectedBarracks();
+      const has = current.some((x) => x.id === id);
+      const next = has ? current.filter((x) => x.id !== id) : [...current, b];
+      const focusStill =
+        this.state.selectedBuildingId != null && next.some((x) => x.id === this.state.selectedBuildingId);
+      const focus = has ? (focusStill ? this.state.selectedBuildingId : (next[0]?.id ?? null)) : id;
+      this.applyBarracksSelection(next, focus);
+      return true;
+    }
+    if (ownBarracks) {
+      this.applyBarracksSelection([b], id);
+      return true;
+    }
+    this.state.selectedVillagerIds = [];
+    this.state.selectedUnitIds = [];
+    this.state.selectedKeepTeam = null;
+    this.state.buildSelection = null;
+    this.setBuildingSelection(id);
+    return true;
+  }
+
+  /** Every living barracks this player owns, anywhere on the map. */
+  selectAllFriendlyBarracks(additive = false, focusId?: number): boolean {
+    const all = this.state.buildings.filter(
+      (b) => b.team === this.localTeam && b.kind === "barracks" && b.hp > 0,
+    );
+    if (all.length === 0) return false;
+    const next: Building[] = additive ? this.livingSelectedBarracks() : [];
+    const seen = new Set(next.map((b) => b.id));
+    for (const b of all) {
+      if (!seen.has(b.id)) next.push(b);
+    }
+    const focus = focusId != null && next.some((b) => b.id === focusId) ? focusId : (next[0]?.id ?? null);
+    this.applyBarracksSelection(next, focus);
+    return true;
+  }
+
+  private applyBarracksSelection(buildings: Building[], focusId: number | null) {
+    const ids: number[] = [];
+    const seen = new Set<number>();
+    for (const b of buildings) {
+      if (b.team !== this.localTeam || b.kind !== "barracks" || b.hp <= 0 || seen.has(b.id)) continue;
+      seen.add(b.id);
+      ids.push(b.id);
+    }
+    ids.sort((a, c) => a - c);
+    this.state.selectedBuildingIds = ids;
+    this.state.selectedBuildingId = focusId != null && seen.has(focusId) ? focusId : (ids[0] ?? null);
+    this.state.selectedVillagerIds = [];
+    this.state.selectedUnitIds = [];
+    this.state.selectedKeepTeam = null;
+    this.state.buildSelection = null;
+  }
+
+  private setBuildingSelection(id: number | null) {
+    this.state.selectedBuildingId = id;
+    if (id == null) {
+      this.state.selectedBuildingIds = [];
+      return;
+    }
+    const b = this.state.buildings.find((x) => x.id === id);
+    this.state.selectedBuildingIds =
+      b && b.hp > 0 && b.kind === "barracks" && b.team === this.localTeam ? [id] : [];
+  }
+
+  private forgetBuilding(id: number) {
+    if (this.state.selectedBuildingIds.includes(id)) {
+      this.state.selectedBuildingIds = this.state.selectedBuildingIds.filter((x) => x !== id);
+    }
+    if (this.state.selectedBuildingId === id) {
+      this.state.selectedBuildingId = this.state.selectedBuildingIds[0] ?? null;
+    }
+  }
+
+  /** Selected living friendly barracks, lowest id first. The focused building is included. */
+  private livingSelectedBarracks(): Building[] {
+    const wanted = new Set(this.state.selectedBuildingIds);
+    if (this.state.selectedBuildingId != null) wanted.add(this.state.selectedBuildingId);
+    const found: Building[] = [];
+    for (const b of this.state.buildings) {
+      if (!wanted.has(b.id)) continue;
+      if (b.team !== this.localTeam || b.kind !== "barracks" || b.hp <= 0) continue;
+      found.push(b);
+    }
+    found.sort((a, b) => a.id - b.id);
+    return found;
   }
 
   selectVillagersInRect(a: { x: number; y: number }, b: { x: number; y: number }, additive = false) {
@@ -1867,7 +1979,7 @@ export class GameSim {
       ? [...new Set([...this.state.selectedVillagerIds, ...ids])]
       : ids;
     this.state.selectedUnitIds = [];
-    this.state.selectedBuildingId = null;
+    this.setBuildingSelection(null);
     this.state.selectedKeepTeam = null;
     this.state.buildSelection = null;
   }
@@ -1886,7 +1998,7 @@ export class GameSim {
     } else {
       this.state.selectedUnitIds = [id];
     }
-    this.state.selectedBuildingId = null;
+    this.setBuildingSelection(null);
     this.state.selectedKeepTeam = null;
     this.state.selectedVillagerIds = [];
     this.state.buildSelection = null;
@@ -1921,7 +2033,7 @@ export class GameSim {
       this.state.selectedUnitIds = picked;
     }
     if (this.state.selectedUnitIds.length === 0) return false;
-    this.state.selectedBuildingId = null;
+    this.setBuildingSelection(null);
     this.state.selectedKeepTeam = null;
     this.state.selectedVillagerIds = [];
     this.state.buildSelection = null;
@@ -2348,7 +2460,7 @@ export class GameSim {
       if (ids.length === 0) return false;
       this.state.selectedUnitIds = ids;
       this.state.selectedVillagerIds = [];
-      this.state.selectedBuildingId = null;
+      this.setBuildingSelection(null);
       this.state.selectedKeepTeam = null;
       this.state.buildSelection = null;
       return true;
@@ -2360,7 +2472,7 @@ export class GameSim {
     if (ids.length === 0) return false;
     this.state.selectedVillagerIds = ids;
     this.state.selectedUnitIds = [];
-    this.state.selectedBuildingId = null;
+    this.setBuildingSelection(null);
     this.state.selectedKeepTeam = null;
     this.state.buildSelection = null;
     return true;
@@ -2724,7 +2836,11 @@ export class GameSim {
     const queued = this.state.buildings
       .filter((b) => b.team === team && b.kind === "barracks")
       .reduce((n, b) => n + b.queue.length, 0);
-    return alive + queued;
+    const keepQueued = this.state.keeps[team].troopQueue.length;
+    const templarQueued = this.state.buildings
+      .filter((b) => b.team === team && b.kind === "church" && b.cathedral)
+      .reduce((n, b) => n + (b.templarQueue?.length ?? 0), 0);
+    return alive + queued + keepQueued + templarQueued;
   }
 
   /** Gold + wood sunk into living barracks troops (relative army strength). */
@@ -2767,7 +2883,7 @@ export class GameSim {
     }
   }
 
-  /** Free levy every 10s and templar every 60s from each church. */
+  /** Free soldier every 10s and templar every 60s from each church, including cathedrals. */
   private tickChurchSpawns(dt: number) {
     for (const b of this.state.buildings) {
       if (b.kind !== "church" || b.hp <= 0) continue;
@@ -2777,7 +2893,7 @@ export class GameSim {
       b.churchTemplarTimer -= dt;
       if (b.churchLevyTimer <= 0) {
         if (this.armySlotsUsed(b.team) < this.armyCap(b.team)) {
-          this.spawnUnit(b.team, "levy", this.pickLane(b.team), true);
+          this.spawnUnit(b.team, "soldier", this.pickLane(b.team), true);
           const layer = this.state.defendLayer[b.team];
           if (layer) this.assignDefendRallies(b.team, layer, true);
           b.churchLevyTimer = CHURCH_LEVY_INTERVAL;
@@ -2946,6 +3062,37 @@ export class GameSim {
       } else {
         this.tell(team, "Peon ready.");
       }
+    }
+  }
+
+  /** Raiders and brutes finish at the upgraded keep and enter the army like other trained troops. */
+  private tickKeepTroops(dt: number) {
+    for (const team of ["you", "foe"] as Team[]) {
+      const keep = this.state.keeps[team];
+      if (!keep.upgraded || keep.troopQueue.length === 0) continue;
+      const job = keep.troopQueue[0]!;
+      job.timeLeft -= dt;
+      if (job.timeLeft > 0) continue;
+      this.spawnUnit(team, job.kind, this.pickLane(team), true);
+      keep.troopQueue.shift();
+      const layer = this.state.defendLayer[team];
+      if (layer) this.assignDefendRallies(team, layer, true);
+    }
+  }
+
+  /** Paid templars finish at the cathedral that queued them. Free church spawns are untouched. */
+  private tickCathedralQueues(dt: number) {
+    for (const b of this.state.buildings) {
+      if (b.kind !== "church" || !b.cathedral || b.hp <= 0) continue;
+      const queue = b.templarQueue;
+      if (!queue || queue.length === 0) continue;
+      const job = queue[0]!;
+      job.timeLeft -= dt;
+      if (job.timeLeft > 0) continue;
+      this.spawnUnit(b.team, "templar", this.pickLane(b.team), true, b);
+      queue.shift();
+      const layer = this.state.defendLayer[b.team];
+      if (layer) this.assignDefendRallies(b.team, layer, true);
     }
   }
 
@@ -3332,10 +3479,7 @@ export class GameSim {
     node.workers += 1;
     chosen.targetNodeId = node.id;
     chosen.state = "toNode";
-    if (team === this.localTeam) {
-      this.state.firstVillagerAssigned = true;
-      if (node.team !== team) this.tell(team, `Eco raid: peon sent to enemy ${node.kind === "pine" ? "wood" : "gold"}!`);
-    }
+    if (team === this.localTeam) this.state.firstVillagerAssigned = true;
   }
 
   callVillagersHome(team: Team) {
@@ -3877,7 +4021,7 @@ export class GameSim {
     });
     if (team === this.localTeam) {
       s.buildSelection = null;
-      s.selectedBuildingId = id;
+      this.setBuildingSelection(id);
       s.selectedUnitIds = [];
       s.selectedVillagerIds = [];
       s.selectedKeepTeam = null;
@@ -3977,7 +4121,180 @@ export class GameSim {
     if (team === "you" && this.humanLog.active) {
       this.humanLog.buildOrder.push({ t: Math.round(s.time), kind: "church", zone: "midEco" });
     }
-    this.tell(team, "Church consecrated — free levies, templars, blessing aura.");
+    this.tell(team, "Church consecrated — free soldiers, templars, blessing aura.");
+  }
+
+  /** Pay 1000 gold and 1000 wood to unlock raiders, brutes, and cathedral upgrades. */
+  upgradeSelectedKeep() {
+    if (this.state.selectedKeepTeam !== this.localTeam) return false;
+    if (this.redirect({ t: "keepUpgrade", team: this.localTeam })) return true;
+    return this.upgradeKeep(this.localTeam);
+  }
+
+  private upgradeKeep(team: Team) {
+    const keep = this.state.keeps[team];
+    if (keep.upgraded) {
+      this.tell(team, "Keep is already upgraded.");
+      return false;
+    }
+    const cost: ResCost = { gold: KEEP_UPGRADE_GOLD, wood: KEEP_UPGRADE_WOOD };
+    if (!this.canAfford(team, cost)) {
+      this.tell(team, `Need ${cost.gold}g ${cost.wood}w to upgrade the keep.`);
+      return false;
+    }
+    this.spendRes(team, cost);
+    keep.upgraded = true;
+    this.tell(team, "Keep upgraded — train raiders and brutes here. Churches can become cathedrals.");
+    return true;
+  }
+
+  /** Pay 1500 gold and 1000 wood to turn the selected church into a cathedral. */
+  raiseSelectedCathedral() {
+    const id = this.state.selectedBuildingId;
+    if (id == null) return false;
+    if (this.redirect({ t: "cathedral", team: this.localTeam, buildingId: id })) return true;
+    return this.raiseCathedral(this.localTeam, id);
+  }
+
+  private raiseCathedral(team: Team, buildingId: number) {
+    const s = this.state;
+    if (!s.keeps[team].upgraded) {
+      this.tell(team, "Upgrade your keep before raising a cathedral.");
+      return false;
+    }
+    const b = s.buildings.find((x) => x.id === buildingId && x.team === team && x.kind === "church");
+    if (!b) {
+      this.tell(team, "Select a church to raise a cathedral.");
+      return false;
+    }
+    if (b.cathedral) {
+      this.tell(team, "This church is already a cathedral.");
+      return false;
+    }
+    const cost: ResCost = { gold: CATHEDRAL_UPGRADE_GOLD, wood: CATHEDRAL_UPGRADE_WOOD };
+    if (!this.canAfford(team, cost)) {
+      this.tell(team, `Need ${cost.gold}g ${cost.wood}w to raise a cathedral.`);
+      return false;
+    }
+    this.spendRes(team, cost);
+    b.spent += cost.gold;
+    b.spentWood += cost.wood;
+    b.cathedral = true;
+    b.templarQueue = b.templarQueue ?? [];
+    this.tell(team, "Cathedral raised — queue templars here. Free soldiers and templars continue.");
+    return true;
+  }
+
+  enqueueKeepTrain(kind: KeepTrainKind) {
+    if (kind !== "raider" && kind !== "brute") return false;
+    if (this.redirect({ t: "keepTrain", team: this.localTeam, kind })) return true;
+    return this.enqueueKeepTrainAt(this.localTeam, kind);
+  }
+
+  private enqueueKeepTrainAt(team: Team, kind: KeepTrainKind) {
+    if (kind !== "raider" && kind !== "brute") return false;
+    const keep = this.state.keeps[team];
+    if (!keep.upgraded) {
+      this.tell(team, "Upgrade the keep before training raiders or brutes.");
+      return false;
+    }
+    if (keep.troopQueue.length >= MAX_TRAIN_QUEUE) {
+      this.tell(team, "Training queue is full.");
+      return false;
+    }
+    if (this.armySlotsUsed(team) >= this.armyCap(team)) {
+      this.tell(team, `Army cap ${this.armyCap(team)} — raise midfield houses or a church.`);
+      return false;
+    }
+    const def = UNIT_DEFS[kind];
+    const cost: ResCost = { gold: def.cost ?? 0, wood: def.woodCost ?? 0 };
+    if (!this.canAfford(team, cost)) {
+      this.tell(team, `Need ${cost.gold}g ${cost.wood}w.`);
+      return false;
+    }
+    this.spendRes(team, cost);
+    const trainTime = def.trainTime ?? 6;
+    keep.troopQueue.push({ kind, timeLeft: trainTime, totalTime: trainTime });
+    this.tell(team, `${def.label} queued at the keep.`);
+    return true;
+  }
+
+  enqueueTemplar() {
+    const id = this.state.selectedBuildingId;
+    if (id == null) {
+      this.tell(this.localTeam, "Select a cathedral first.");
+      return false;
+    }
+    if (this.redirect({ t: "templar", team: this.localTeam, buildingId: id })) return true;
+    return this.enqueueTemplarAt(this.localTeam, id);
+  }
+
+  private enqueueTemplarAt(team: Team, buildingId: number) {
+    const b = this.state.buildings.find((x) => x.id === buildingId && x.team === team && x.kind === "church");
+    if (!b || !b.cathedral) {
+      this.tell(team, "Select a cathedral to train templars.");
+      return false;
+    }
+    const queue = (b.templarQueue ??= []);
+    if (queue.length >= MAX_TRAIN_QUEUE) {
+      this.tell(team, "Training queue is full.");
+      return false;
+    }
+    if (this.armySlotsUsed(team) >= this.armyCap(team)) {
+      this.tell(team, `Army cap ${this.armyCap(team)} — raise midfield houses or a church.`);
+      return false;
+    }
+    const def = UNIT_DEFS.templar;
+    const cost: ResCost = { gold: def.cost ?? 0, wood: def.woodCost ?? 0 };
+    if (!this.canAfford(team, cost)) {
+      this.tell(team, `Need ${cost.gold}g ${cost.wood}w.`);
+      return false;
+    }
+    this.spendRes(team, cost);
+    const trainTime = def.trainTime ?? 12;
+    queue.push({ timeLeft: trainTime, totalTime: trainTime });
+    this.tell(team, "Templar queued.");
+    return true;
+  }
+
+  cancelKeepTroop(index: number) {
+    if (this.state.selectedKeepTeam !== this.localTeam) return;
+    if (this.redirect({ t: "cancelKeep", team: this.localTeam, index })) return;
+    this.cancelKeepTroopAt(this.localTeam, index);
+  }
+
+  private cancelKeepTroopAt(team: Team, index: number) {
+    const keep = this.state.keeps[team];
+    const job = keep.troopQueue[index];
+    if (!job) return;
+    const def = UNIT_DEFS[job.kind];
+    const refundG = Math.floor((def.cost ?? 0) * 0.5);
+    const refundW = Math.floor((def.woodCost ?? 0) * 0.5);
+    this.state.gold[team] += refundG;
+    this.state.wood[team] += refundW;
+    keep.troopQueue.splice(index, 1);
+    this.tell(team, `Cancelled (+${refundG}g +${refundW}w).`);
+  }
+
+  cancelTemplarSlot(index: number) {
+    const id = this.state.selectedBuildingId;
+    if (id == null) return;
+    if (this.redirect({ t: "cancelTemplar", team: this.localTeam, buildingId: id, index })) return;
+    this.cancelTemplarAt(this.localTeam, id, index);
+  }
+
+  private cancelTemplarAt(team: Team, buildingId: number, index: number) {
+    const b = this.state.buildings.find((x) => x.id === buildingId && x.team === team && x.kind === "church" && x.cathedral);
+    const queue = b?.templarQueue;
+    const job = queue?.[index];
+    if (!b || !queue || !job) return;
+    const def = UNIT_DEFS.templar;
+    const refundG = Math.floor((def.cost ?? 0) * 0.5);
+    const refundW = Math.floor((def.woodCost ?? 0) * 0.5);
+    this.state.gold[team] += refundG;
+    this.state.wood[team] += refundW;
+    queue.splice(index, 1);
+    this.tell(team, `Cancelled (+${refundG}g +${refundW}w).`);
   }
 
   razeSelected() {
@@ -3996,7 +4313,7 @@ export class GameSim {
     s.gold[team] += refundG;
     s.wood[team] += refundW;
     s.buildings = s.buildings.filter((x) => x.id !== b.id);
-    if (s.selectedBuildingId === b.id) s.selectedBuildingId = null;
+    this.forgetBuilding(b.id);
     if (refundG > 0 || refundW > 0) this.tell(team, `Razed for +${refundG}g +${refundW}w.`);
     else this.tell(team, "Razed. The first tower returns no resources.");
   }
@@ -4004,7 +4321,7 @@ export class GameSim {
   private wreckBuilding(b: Building, from: Unit) {
     const s = this.state;
     s.buildings = s.buildings.filter((x) => x.id !== b.id);
-    if (s.selectedBuildingId === b.id) s.selectedBuildingId = null;
+    this.forgetBuilding(b.id);
     s.shake = Math.max(s.shake, 0.14);
     this.addFloat("WRECK", b.pos.x, b.pos.y - 10, "#e4bd77");
     this.tell(from.team, `Trebuchet wrecked the ${buildingName(b.kind)}.`);
@@ -4725,15 +5042,53 @@ export class GameSim {
     moveTowards(u.pos, this.spyGoalAroundDogs(u, keep.pos), u.speed, dt);
   }
 
+  /**
+   * Barracks that should receive the next train order.
+   * One selected barracks keeps today's behavior.
+   * Several: shortest queue, then lowest building id. A full queue is skipped
+   * while another selected barracks still has room.
+   * Orders already sent and not yet in a host snapshot count toward the length,
+   * so a burst of clicks stays even. The chosen id is what the train command carries.
+   */
+  private pickTrainHallId(): number | null {
+    const halls = this.livingSelectedBarracks();
+    if (halls.length === 0) return null;
+    let pool = halls;
+    if (halls.length > 1) {
+      const open = halls.filter((b) => this.queueLoad(b) < MAX_TRAIN_QUEUE);
+      if (open.length > 0) pool = open;
+    }
+    let best = pool[0]!;
+    let bestLoad = this.queueLoad(best);
+    for (let i = 1; i < pool.length; i++) {
+      const b = pool[i]!;
+      const load = this.queueLoad(b);
+      if (load < bestLoad || (load === bestLoad && b.id < best.id)) {
+        best = b;
+        bestLoad = load;
+      }
+    }
+    return best.id;
+  }
+
+  private queueLoad(b: Building) {
+    return b.queue.length + (this.pendingTrain.get(b.id) ?? 0);
+  }
+
+  private notePendingTrain(buildingId: number) {
+    this.pendingTrain.set(buildingId, (this.pendingTrain.get(buildingId) ?? 0) + 1);
+  }
+
   enqueueTrain(kind: TrainKind, team: Team = "you") {
     if (team === this.localTeam) {
-      const id = this.state.selectedBuildingId;
+      const id = this.pickTrainHallId();
       if (this.orderSink && !this.applyingRemote) {
         if (id == null) {
           this.addToast("Select a barracks first.");
           return false;
         }
         this.orderSink({ t: "train", team, kind, buildingId: id });
+        this.notePendingTrain(id);
         return true;
       }
       if (id == null) {
@@ -4784,8 +5139,8 @@ export class GameSim {
     return true;
   }
 
-  cancelQueueSlot(index: number) {
-    const id = this.state.selectedBuildingId;
+  cancelQueueSlot(index: number, buildingId?: number) {
+    const id = buildingId ?? this.state.selectedBuildingId;
     if (id == null) return;
     if (this.redirect({ t: "cancel", team: this.localTeam, buildingId: id, index })) return;
     this.cancelTrainAt(this.localTeam, id, index);
@@ -5416,7 +5771,7 @@ export class GameSim {
     this.addFloat(`-${Math.round(dmg)}`, b.pos.x, b.pos.y - 8, u.kind === "archer" ? "#e8d39a" : "#ffd1cc");
     if (b.hp <= 0) {
       this.state.buildings = this.state.buildings.filter((x) => x.id !== b.id);
-      if (this.state.selectedBuildingId === b.id) this.state.selectedBuildingId = null;
+      this.forgetBuilding(b.id);
       this.state.shake = Math.max(this.state.shake, 0.12);
       this.addFloat("WRECK", b.pos.x, b.pos.y - 10, "#e4bd77");
       this.tell(team, `${UNIT_DEFS[u.kind].label} destroyed the ${buildingName(b.kind)}.`);
@@ -6139,7 +6494,7 @@ export class GameSim {
     s.pads = [];
     s.nodes = [];
     s.commandMarkers = [];
-    s.selectedBuildingId = null;
+    this.setBuildingSelection(null);
     s.selectedVillagerIds = [];
     s.selectedUnitIds = [];
     s.selectedKeepTeam = null;
@@ -6899,6 +7254,8 @@ export class GameSim {
     this.tickChurchAuras(dt);
     this.tickChurchSpawns(dt);
     this.tickPeonQueues(dt);
+    this.tickKeepTroops(dt);
+    this.tickCathedralQueues(dt);
     this.updateUnitMovementAndMelee(dt, "you");
     this.updateUnitMovementAndMelee(dt, "foe");
     this.sampleHumanLog();
@@ -7504,6 +7861,24 @@ export class GameSim {
         case "church":
           this.consecrateHouse(team, order.buildingId);
           break;
+        case "keepUpgrade":
+          this.upgradeKeep(team);
+          break;
+        case "keepTrain":
+          if (order.kind === "raider" || order.kind === "brute") this.enqueueKeepTrainAt(team, order.kind);
+          break;
+        case "cancelKeep":
+          this.cancelKeepTroopAt(team, order.index);
+          break;
+        case "cathedral":
+          this.raiseCathedral(team, order.buildingId);
+          break;
+        case "templar":
+          this.enqueueTemplarAt(team, order.buildingId);
+          break;
+        case "cancelTemplar":
+          this.cancelTemplarAt(team, order.buildingId, order.index);
+          break;
         case "cancel":
           this.cancelTrainAt(team, order.buildingId, order.index);
           break;
@@ -7602,6 +7977,12 @@ export class GameSim {
       hitFlash: s.keeps[team].hitFlash,
       attackFlash: s.keeps[team].attackFlash,
       queue: s.keeps[team].peonQueue.map((job) => ({ timeLeft: job.timeLeft, totalTime: job.totalTime })),
+      upgraded: s.keeps[team].upgraded,
+      troopQueue: s.keeps[team].troopQueue.map((job) => ({
+        kind: job.kind,
+        timeLeft: job.timeLeft,
+        totalTime: job.totalTime,
+      })),
     });
     return {
       mapId: s.mapId,
@@ -7692,6 +8073,8 @@ export class GameSim {
         disableTimer: b.disableTimer,
         churchLevyTimer: b.churchLevyTimer,
         churchTemplarTimer: b.churchTemplarTimer,
+        cathedral: b.cathedral === true,
+        templarQueue: (b.templarQueue ?? []).map((job) => ({ timeLeft: job.timeLeft, totalTime: job.totalTime })),
         queue: b.queue.map((job) => ({ kind: job.kind, timeLeft: job.timeLeft, totalTime: job.totalTime })),
         rallyX: b.rallyPoint?.x,
         rallyY: b.rallyPoint?.y,
@@ -7830,6 +8213,7 @@ export class GameSim {
   }
 
   private copySnapshot(snap: MatchSnapshot) {
+    this.pendingTrain.clear();
     const s = this.state;
     const mapChanged = snap.mapId !== s.mapId;
     if (mapChanged) {
@@ -7861,6 +8245,7 @@ export class GameSim {
     const selectedVillagerIds = s.selectedVillagerIds;
     const selectedUnitIds = s.selectedUnitIds;
     const selectedBuildingId = s.selectedBuildingId;
+    const selectedBuildingIds = [...s.selectedBuildingIds];
     const selectedKeepTeam = s.selectedKeepTeam;
     const buildSelection = s.buildSelection;
     const commandTeam = s.commandTeam;
@@ -7923,6 +8308,17 @@ export class GameSim {
       s.keeps[team].hitFlash = keep.hitFlash;
       s.keeps[team].attackFlash = keep.attackFlash;
       s.keeps[team].peonQueue = keep.queue.map((job) => ({ timeLeft: job.timeLeft, totalTime: job.totalTime }));
+      s.keeps[team].upgraded = keep.upgraded === true;
+      const troops = Array.isArray(keep.troopQueue) ? keep.troopQueue : [];
+      s.keeps[team].troopQueue = troops
+        .filter(
+          (job) =>
+            !!job &&
+            (job.kind === "raider" || job.kind === "brute") &&
+            Number.isFinite(job.timeLeft) &&
+            Number.isFinite(job.totalTime),
+        )
+        .map((job) => ({ kind: job.kind, timeLeft: job.timeLeft, totalTime: job.totalTime }));
     }
     if (snap.keeps[this.localTeam].hitFlash > 0) s.redFlash = Math.max(s.redFlash, 0.18);
 
@@ -8041,6 +8437,10 @@ export class GameSim {
       disableTimer: b.disableTimer ?? 0,
       churchLevyTimer: b.churchLevyTimer,
       churchTemplarTimer: b.churchTemplarTimer,
+      cathedral: b.cathedral === true,
+      templarQueue: (Array.isArray(b.templarQueue) ? b.templarQueue : [])
+        .filter((job) => !!job && Number.isFinite(job.timeLeft) && Number.isFinite(job.totalTime))
+        .map((job) => ({ timeLeft: job.timeLeft, totalTime: job.totalTime })),
       queue: b.queue.map((job) => ({ kind: job.kind, timeLeft: job.timeLeft, totalTime: job.totalTime })),
       rallyPoint: point(b.rallyX, b.rallyY),
     }));
@@ -8101,11 +8501,30 @@ export class GameSim {
       s.units.filter((u) => u.team === this.localTeam && u.fromBarracks && u.hp > 0).map((u) => u.id),
     );
     s.selectedUnitIds = selectedUnitIds.filter((id) => livingUnits.has(id));
+    const ownBarracks = new Set(
+      s.buildings
+        .filter((b) => b.team === this.localTeam && b.kind === "barracks" && b.hp > 0)
+        .map((b) => b.id),
+    );
+    s.selectedBuildingIds = selectedBuildingIds.filter((id) => ownBarracks.has(id));
     s.selectedBuildingId = s.buildings.some((b) => b.id === selectedBuildingId) ? selectedBuildingId : null;
+    if (
+      s.selectedBuildingId != null &&
+      ownBarracks.has(s.selectedBuildingId) &&
+      !s.selectedBuildingIds.includes(s.selectedBuildingId)
+    ) {
+      s.selectedBuildingIds.push(s.selectedBuildingId);
+      s.selectedBuildingIds.sort((a, b) => a - b);
+    }
+    if (s.selectedBuildingId == null && s.selectedBuildingIds.length > 0) {
+      s.selectedBuildingId = s.selectedBuildingIds[0]!;
+    }
     if (this.pendingOwnPad) {
       const raised = s.buildings.find((b) => b.padId === this.pendingOwnPad && b.team === this.localTeam);
       if (raised) {
         s.selectedBuildingId = raised.id;
+        s.selectedBuildingIds =
+          raised.kind === "barracks" && raised.hp > 0 ? [raised.id] : [];
         s.selectedVillagerIds = [];
         s.selectedUnitIds = [];
         s.selectedKeepTeam = null;
@@ -8127,8 +8546,19 @@ export class GameSim {
     const dmgCost = selected && selected.damageRank < 2 ? UPGRADE_COST[selected.damageRank] : 0;
     const rateCost = selected && selected.rateRank < 2 ? UPGRADE_COST[selected.rateRank] : 0;
     const trainHall = selected && this.isTrainHall(selected.kind);
-    const trainQueue =
-      trainHall
+    const selectedHalls = this.livingSelectedBarracks();
+    const multiTrain = selectedHalls.length > 1;
+    const trainQueue = multiTrain
+      ? selectedHalls.flatMap((hall) =>
+          hall.queue.map((j, queueIndex) => ({
+            kind: j.kind,
+            label: UNIT_DEFS[j.kind].label,
+            pct: 1 - j.timeLeft / Math.max(0.01, j.totalTime),
+            buildingId: hall.id,
+            queueIndex,
+          })),
+        )
+      : trainHall
         ? selected!.queue.map((j) => ({
             kind: j.kind,
             label: UNIT_DEFS[j.kind].label,
@@ -8159,6 +8589,43 @@ export class GameSim {
           pct: 1 - j.timeLeft / Math.max(0.01, j.totalTime),
         }))
       : [];
+    const ownKeep = s.keeps[view];
+    const keepUpgraded = ownKeep.upgraded === true;
+    const keepTrainOptions =
+      keepSelected && keepUpgraded
+        ? (["raider", "brute"] as const).map((kind) => {
+            const def = UNIT_DEFS[kind];
+            const seconds = def.trainTime ?? 0;
+            return {
+              kind,
+              label: def.label,
+              blurb:
+                kind === "raider"
+                  ? `Fast melee from the keep · ${seconds}s`
+                  : `Heavy melee from the keep · ${seconds}s`,
+              cost: def.cost ?? 0,
+              woodCost: def.woodCost ?? 0,
+            };
+          })
+        : [];
+    const keepTroopQueue =
+      keepSelected && keepUpgraded
+        ? ownKeep.troopQueue.map((j) => ({
+            kind: j.kind,
+            label: UNIT_DEFS[j.kind].label,
+            pct: 1 - j.timeLeft / Math.max(0.01, j.totalTime),
+          }))
+        : [];
+    const selectedIsCathedral = !!selected && selected.kind === "church" && selected.cathedral === true;
+    const templarDef = UNIT_DEFS.templar;
+    const templarQueue =
+      selectedIsCathedral && selectedIsYours
+        ? (selected.templarQueue ?? []).map((j) => ({
+            kind: "templar" as const,
+            label: templarDef.label,
+            pct: 1 - j.timeLeft / Math.max(0.01, j.totalTime),
+          }))
+        : [];
     const canUpgradeStructure =
       !!selected && selectedIsYours && selected.kind !== "house" && selected.kind !== "church";
 
@@ -8223,6 +8690,7 @@ export class GameSim {
       selectedBuildingId: selected?.id ?? null,
       selectedBuildingTeam: selected?.team ?? null,
       selectedBuildingKind: selected?.kind ?? null,
+      selectedBarracksCount: selectedHalls.length,
       selectedKeepTeam: s.selectedKeepTeam,
       selectedPeonCount: s.selectedVillagerIds.length,
       selectedArmy: this.buildSelectedArmyUi(view),
@@ -8240,7 +8708,7 @@ export class GameSim {
       selectedRazeRefund: selected && selectedIsYours ? (selected.canRefund ? Math.floor(selected.spent * 0.5) : 0) : 0,
       selectedRazeRefundWood:
         selected && selectedIsYours ? (selected.canRefund ? Math.floor(selected.spentWood * 0.5) : 0) : 0,
-      selectedTrainPct: trainQueue[0]?.pct ?? peonQueue[0]?.pct ?? null,
+      selectedTrainPct: trainQueue[0]?.pct ?? templarQueue[0]?.pct ?? keepTroopQueue[0]?.pct ?? peonQueue[0]?.pct ?? null,
       selectedUpgradeCost: { damage: dmgCost, rate: rateCost },
       trainQueue,
       trainOptions,
@@ -8262,6 +8730,23 @@ export class GameSim {
       keepGarrisonMax: KEEP_GARRISON_MAX,
       canTrainPeon: keepSelected && this.peonSlotsUsed(view) < this.peonCap(view),
       peonTrainCost: { gold: PEON_TRAIN_GOLD, wood: PEON_TRAIN_WOOD },
+      keepUpgraded,
+      canUpgradeKeep: keepSelected && !keepUpgraded,
+      keepUpgradeCost: { gold: KEEP_UPGRADE_GOLD, wood: KEEP_UPGRADE_WOOD },
+      keepTrainOptions,
+      keepTroopQueue,
+      selectedIsCathedral,
+      selectedCanRaiseCathedral:
+        !!selected &&
+        selectedIsYours &&
+        selected.kind === "church" &&
+        selected.cathedral !== true &&
+        keepUpgraded &&
+        s.gold[view] >= CATHEDRAL_UPGRADE_GOLD &&
+        s.wood[view] >= CATHEDRAL_UPGRADE_WOOD,
+      cathedralUpgradeCost: { gold: CATHEDRAL_UPGRADE_GOLD, wood: CATHEDRAL_UPGRADE_WOOD },
+      templarTrainCost: { gold: templarDef.cost ?? 0, wood: templarDef.woodCost ?? 0 },
+      templarQueue,
       buildCosts: BUILD_COST,
       keepLevel: this.matchMode === "pvp" ? s.keepLevel : meta.level,
       keepXp: meta.xp,

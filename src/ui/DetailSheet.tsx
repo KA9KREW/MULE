@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { BASE_ARMY_CAP, CHURCH_ARMY_POP, HOUSE_POP, MID_HOUSE_ARMY_POP } from "../game/balance";
+import { BASE_ARMY_CAP, CHURCH_ARMY_POP, HOUSE_POP, MID_HOUSE_ARMY_POP, TEMPLAR_TRAIN_TIME } from "../game/balance";
 import { isEnemyStructure } from "../game/ownership";
 import { buildingName } from "../game/sim";
-import type { BuildingKind, TrainKind, UiSnapshot, UnitKind } from "../game/types";
+import type { BuildingKind, KeepTrainKind, TrainKind, UiSnapshot, UnitKind } from "../game/types";
 
 export interface DetailSheetProps {
   ui: UiSnapshot;
@@ -10,6 +10,12 @@ export interface DetailSheetProps {
   onUpgradeRate: () => void;
   onRaze: () => void;
   onConsecrate: () => void;
+  onUpgradeKeep: () => void;
+  onEnqueueKeep: (kind: KeepTrainKind) => void;
+  onCancelKeepQueue: (index: number) => void;
+  onRaiseCathedral: () => void;
+  onEnqueueTemplar: () => void;
+  onCancelTemplar: (index: number) => void;
   onClose: () => void;
   onEnqueue: (kind: TrainKind) => void;
   onCancelQueue: (index: number) => void;
@@ -31,7 +37,7 @@ const STRUCTURE_ROLE: Partial<Record<BuildingKind, string>> = {
   ballista: "Armor-piercing bolts at a fixed rate. Upgrade posts guard dogs that kill spies on the pad.",
   catapult: "Splash that stays strong at the gate and breaks barricades.",
   barricade: "A peon blocks one road. Melee has to chop it. A ram smashes it.",
-  church: `Upgraded purple house. Blessing aura (+25% damage, regen), +${CHURCH_ARMY_POP} army pop. Free levy every 10s, templar knight every 60s.`,
+  church: `Upgraded purple house. Blessing aura (+25% damage, regen), +${CHURCH_ARMY_POP} army pop. Free soldier every 10s, templar knight every 60s.`,
 };
 
 function costLabel(gold: number, wood: number) {
@@ -47,6 +53,12 @@ export function DetailSheet({
   onUpgradeRate,
   onRaze,
   onConsecrate,
+  onUpgradeKeep,
+  onEnqueueKeep,
+  onCancelKeepQueue,
+  onRaiseCathedral,
+  onEnqueueTemplar,
+  onCancelTemplar,
   onClose,
   onEnqueue,
   onCancelQueue,
@@ -204,7 +216,7 @@ export function DetailSheet({
       <div className={sheetClass}>
         <div className="detail-head">
           <div>
-            <div className="detail-title">Your Keep</div>
+            <div className="detail-title">{ui.keepUpgraded ? "Your Keep · Upgraded" : "Your Keep"}</div>
             <div className="detail-sub">
               Peons {ui.peonCount}/{ui.peonCap} · Garrison {ui.keepGarrisoned}/{ui.keepGarrisonMax}
             </div>
@@ -265,6 +277,73 @@ export function DetailSheet({
             ))}
           </div>
         </div>
+        {!ui.keepUpgraded && (
+          <div className="train-options">
+            <button
+              type="button"
+              className={`train-opt${
+                ui.canUpgradeKeep &&
+                ui.yourGold >= ui.keepUpgradeCost.gold &&
+                ui.yourWood >= ui.keepUpgradeCost.wood
+                  ? " afford"
+                  : ""
+              }`}
+              disabled={
+                !ui.canUpgradeKeep ||
+                ui.yourGold < ui.keepUpgradeCost.gold ||
+                ui.yourWood < ui.keepUpgradeCost.wood
+              }
+              onClick={onUpgradeKeep}
+            >
+              <strong>Upgrade keep</strong>
+              <small>Unlock raiders, brutes, and cathedrals</small>
+              <em>{costLabel(ui.keepUpgradeCost.gold, ui.keepUpgradeCost.wood)}</em>
+            </button>
+          </div>
+        )}
+        {ui.keepUpgraded && (
+          <>
+            <p className="detail-note">Raiders and brutes train here and count toward the army cap.</p>
+            <div className="train-options">
+              {ui.keepTrainOptions.map((opt) => {
+                const afford = ui.yourGold >= opt.cost && ui.yourWood >= opt.woodCost;
+                const room = ui.armyCount < ui.armyCap;
+                return (
+                  <button
+                    key={opt.kind}
+                    type="button"
+                    className={`train-opt${afford && room ? " afford" : ""}`}
+                    disabled={!afford || !room}
+                    onClick={() => onEnqueueKeep(opt.kind)}
+                    title={opt.blurb}
+                  >
+                    <strong>{opt.label}</strong>
+                    <small>{opt.blurb}</small>
+                    <em>{costLabel(opt.cost, opt.woodCost)}</em>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="queue-row">
+              <span className="queue-label">Keep queue</span>
+              <div className="queue-slots">
+                {ui.keepTroopQueue.length === 0 && <span className="queue-empty">Empty — tap a unit above</span>}
+                {ui.keepTroopQueue.map((slot, i) => (
+                  <button
+                    key={`${slot.kind}-${i}`}
+                    type="button"
+                    className="queue-chip"
+                    onClick={() => onCancelKeepQueue(i)}
+                    title="Cancel (50% refund)"
+                  >
+                    <i style={{ width: `${Math.round(slot.pct * 100)}%` }} />
+                    <span>{slot.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
         </div>
         )}
       </div>
@@ -277,7 +356,9 @@ export function DetailSheet({
   const isTrainHall = isBarracks;
   const isHouse = ui.selectedBuildingKind === "house";
   const isBallista = ui.selectedBuildingKind === "ballista";
-  const structureName = buildingName(ui.selectedBuildingKind!);
+  const structureName = ui.selectedIsCathedral ? "Cathedral" : buildingName(ui.selectedBuildingKind!);
+  const templarAfford = ui.yourGold >= ui.templarTrainCost.gold && ui.yourWood >= ui.templarTrainCost.wood;
+  const armyRoom = ui.armyCount < ui.armyCap;
 
   return (
     <div className={sheetClass}>
@@ -303,7 +384,7 @@ export function DetailSheet({
           className="cta"
           disabled={!ui.selectedCanConsecrate}
           onClick={onConsecrate}
-          title="500 gold — church with free levies, templars, and a blessing aura"
+          title="500 gold — church with free soldiers, templars, and a blessing aura"
         >
           Consecrate church · 500g
         </button>
@@ -311,7 +392,58 @@ export function DetailSheet({
       {!isHouse && !isTrainHall && !isChurch && STRUCTURE_ROLE[ui.selectedBuildingKind!] && (
         <p className="detail-note">{STRUCTURE_ROLE[ui.selectedBuildingKind!]}</p>
       )}
-      {isChurch && <p className="detail-note">{STRUCTURE_ROLE.church}</p>}
+      {isChurch && !ui.selectedIsCathedral && <p className="detail-note">{STRUCTURE_ROLE.church}</p>}
+      {isChurch && ui.selectedIsCathedral && (
+        <p className="detail-note">
+          Cathedral. Blessing aura (+25% damage, regen), +{CHURCH_ARMY_POP} army pop. Free soldier every 10s, free
+          templar every 60s. Queue more templars below.
+        </p>
+      )}
+      {isChurch && !isEnemy && !ui.selectedIsCathedral && ui.keepUpgraded && (
+        <button
+          type="button"
+          className="cta"
+          disabled={!ui.selectedCanRaiseCathedral}
+          onClick={onRaiseCathedral}
+          title={`${ui.cathedralUpgradeCost.gold} gold and ${ui.cathedralUpgradeCost.wood} wood — queue templars here`}
+        >
+          Raise cathedral · {costLabel(ui.cathedralUpgradeCost.gold, ui.cathedralUpgradeCost.wood)}
+        </button>
+      )}
+      {ui.selectedIsCathedral && !isEnemy && (
+        <>
+          <div className="train-options">
+            <button
+              type="button"
+              className={`train-opt${templarAfford && armyRoom ? " afford" : ""}`}
+              disabled={!templarAfford || !armyRoom}
+              onClick={onEnqueueTemplar}
+            >
+              <strong>Templar</strong>
+              <small>Cathedral knight · {TEMPLAR_TRAIN_TIME}s</small>
+              <em>{costLabel(ui.templarTrainCost.gold, ui.templarTrainCost.wood)}</em>
+            </button>
+          </div>
+          <div className="queue-row">
+            <span className="queue-label">Templar queue</span>
+            <div className="queue-slots">
+              {ui.templarQueue.length === 0 && <span className="queue-empty">Empty — tap Templar above</span>}
+              {ui.templarQueue.map((slot, i) => (
+                <button
+                  key={`templar-${i}`}
+                  type="button"
+                  className="queue-chip"
+                  onClick={() => onCancelTemplar(i)}
+                  title="Cancel (50% refund)"
+                >
+                  <i style={{ width: `${Math.round(slot.pct * 100)}%` }} />
+                  <span>{slot.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
 
       {!isTrainHall && !isHouse && !isChurch && (
         <>
@@ -351,6 +483,11 @@ export function DetailSheet({
             Army {ui.armyCount}/{ui.armyCap}. Levies crack wards, rams break barricades, trebuchets need four shots, spies
             hunt trebuchets, riders shrug arrows, archers walk around blocks.
           </p>
+          {ui.selectedBarracksCount > 1 && (
+            <p className="detail-note">
+              {ui.selectedBarracksCount} barracks selected. Each new unit goes to the shortest queue.
+            </p>
+          )}
 
           <div className="train-options">
             {ui.trainOptions.map((opt) => {
@@ -374,7 +511,7 @@ export function DetailSheet({
           </div>
 
           <div className="queue-row">
-            <span className="queue-label">Queue</span>
+            <span className="queue-label">{ui.selectedBarracksCount > 1 ? "Queues" : "Queue"}</span>
             <div className="queue-slots">
               {ui.trainQueue.length === 0 && <span className="queue-empty">Empty — tap a unit above</span>}
               {ui.trainQueue.map((slot, i) => (

@@ -46,10 +46,31 @@ export const MID_HOUSE_ARMY_POP = 5;
 export const CHURCH_ARMY_POP = 15;
 /** Purple midfield house → church. */
 export const CHURCH_UPGRADE_GOLD = 500;
-/** Free levy interval from a consecrated church. */
+/** Free soldier interval from a consecrated church. */
 export const CHURCH_LEVY_INTERVAL = 10;
 /** Free templar interval from a consecrated church. */
 export const CHURCH_TEMPLAR_INTERVAL = 60;
+/** Keep upgrade. Unlocks raider and brute training, and cathedral upgrades for that team. */
+export const KEEP_UPGRADE_GOLD = 1000;
+export const KEEP_UPGRADE_WOOD = 1000;
+/** Church → cathedral. Rejected until that team's keep is upgraded. */
+export const CATHEDRAL_UPGRADE_GOLD = 1500;
+export const CATHEDRAL_UPGRADE_WOOD = 1000;
+/**
+ * Paid production times, chosen next to existing train times.
+ * Rammer is 5.8s and trebuchet is 9.6s.
+ * Raider 6s sits with the rammer. Brute 8s sits between rammer and trebuchet.
+ * Templar 12s is longer than the trebuchet.
+ */
+export const RAIDER_TRAIN_GOLD = 75;
+export const RAIDER_TRAIN_WOOD = 25;
+export const RAIDER_TRAIN_TIME = 6;
+export const BRUTE_TRAIN_GOLD = 40;
+export const BRUTE_TRAIN_WOOD = 75;
+export const BRUTE_TRAIN_TIME = 8;
+export const TEMPLAR_TRAIN_GOLD = 200;
+export const TEMPLAR_TRAIN_WOOD = 200;
+export const TEMPLAR_TRAIN_TIME = 12;
 /** Blessing radius around a church (sim units). */
 export const CHURCH_AURA_RANGE = 95;
 export const CHURCH_AURA_DAMAGE = 1.25;
@@ -359,6 +380,7 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
   raider: {
     hp: 36, speed: 46, damage: 4, cooldown: 0.7, bounty: 8,
     towerResist: 0.08, keepMult: 0.55, siegeGap: 0.55,
+    cost: RAIDER_TRAIN_GOLD, woodCost: RAIDER_TRAIN_WOOD, trainTime: RAIDER_TRAIN_TIME,
     label: "Raider", blurb: "Fast wave levy",
   },
   soldier: {
@@ -369,6 +391,7 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
   brute: {
     hp: 175, speed: 17, damage: 8, cooldown: 1.05, bounty: 24,
     towerResist: 0.12, keepMult: 0.85, siegeGap: 0.35,
+    cost: BRUTE_TRAIN_GOLD, woodCost: BRUTE_TRAIN_WOOD, trainTime: BRUTE_TRAIN_TIME,
     label: "Brute", blurb: "Heavy wave",
   },
   levy: {
@@ -398,6 +421,7 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
   templar: {
     hp: 240, speed: 24, damage: 10, cooldown: 0.65, bounty: 28,
     towerResist: 0.9, keepMult: 0.75, siegeGap: 0.35,
+    cost: TEMPLAR_TRAIN_GOLD, woodCost: TEMPLAR_TRAIN_WOOD, trainTime: TEMPLAR_TRAIN_TIME,
     label: "Templar", blurb: "Church knight · heavy ward bearing the sacred cross",
   },
   rammer: {
