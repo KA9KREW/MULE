@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { BASE_ARMY_CAP, CHURCH_ARMY_POP, HOUSE_POP, MID_HOUSE_ARMY_POP } from "../game/balance";
 import { isEnemyStructure } from "../game/ownership";
 import { buildingName } from "../game/sim";
 import type { BuildingKind, TrainKind, UiSnapshot, UnitKind } from "../game/types";
@@ -30,8 +31,7 @@ const STRUCTURE_ROLE: Partial<Record<BuildingKind, string>> = {
   ballista: "Armor-piercing bolts at a fixed rate. Upgrade posts guard dogs that kill spies on the pad.",
   catapult: "Splash that stays strong at the gate and breaks barricades.",
   barricade: "A peon blocks one road. Melee has to chop it. A ram smashes it.",
-  church:
-    "Upgraded purple house. Blessing aura (+25% damage, regen), +10 army pop. Free levy every 10s, templar knight every 60s.",
+  church: `Upgraded purple house. Blessing aura (+25% damage, regen), +${CHURCH_ARMY_POP} army pop. Free levy every 10s, templar knight every 60s.`,
 };
 
 function costLabel(gold: number, wood: number) {
@@ -293,8 +293,8 @@ export function DetailSheet({
       <div className="detail-body">
       {isHouse && (
         <p className="detail-note">
-          Yard houses add +3 peon pop. Purple midfield houses add +5 army pop and can consecrate into a church for 500g.
-          Keep army slots scale with roads (15 / 20 / 25).
+          Yard houses add +{HOUSE_POP} peon pop. Purple midfield houses add +{MID_HOUSE_ARMY_POP} army pop and can consecrate into a church (+{CHURCH_ARMY_POP} army pop) for 500g.
+          Keep grants {BASE_ARMY_CAP} base army slots (up to {BASE_ARMY_CAP + 2 * CHURCH_ARMY_POP} max with 2 churches).
         </p>
       )}
       {isHouse && !isEnemy && ui.selectedIsMidHouse && (
