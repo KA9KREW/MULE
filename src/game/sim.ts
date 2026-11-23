@@ -1801,7 +1801,7 @@ export class GameSim {
       const hpBefore = best.hp;
       const dealt = this.strikeDamage(u, best) * POSSESS_DAMAGE_MULT;
       best.hp -= dealt;
-      if ("fromBarracks" in best) this.creditFieldKill(u, best, hpBefore);
+      this.creditFieldKill(u, best, hpBefore);
       if (this.matchMode === "arena" && "kind" in best && !("state" in best)) {
         (best as Unit).lastHitBy = u.id;
       }
@@ -5732,8 +5732,10 @@ export class GameSim {
             if (target.kind === "trebuchet") {
               if (u.attackTimer <= 0) this.spyWreckTrebuchet(u, target);
             } else if (u.attackTimer <= 0) {
+              const hpBefore = target.hp;
               const dealt = this.incoming(target, this.outgoing(u, 10), false);
               target.hp -= dealt;
+              this.creditFieldKill(u, target, hpBefore);
               u.attackTimer = u.attackCooldown;
               this.emitCombat("meleeHit", u.pos, target.pos, team);
               this.addFloat(`-${Math.round(dealt)}`, target.pos.x, target.pos.y - 7, "#e8c8ff");
@@ -6376,11 +6378,27 @@ export class GameSim {
     return commanderFieldBonus(lead.fieldKills ?? 0);
   }
 
-  /** A killing blow counts only while a human is driving the soldier who landed it. */
-  private creditFieldKill(attacker: Unit, victim: Unit, hpBefore: number) {
+  /**
+   * Soldier or peon killed by the body a human is driving, or by a unit
+   * guard-following that body. Buildings never come through here.
+   * Stepping out stops new credit. The count already on the soldier stays until death.
+   */
+  private creditFieldKill(attacker: Unit, victim: Unit | Villager, hpBefore: number) {
     if (hpBefore <= 0 || victim.hp > 0 || victim.team === attacker.team) return;
-    if (!this.isPlayerDriven(attacker)) return;
-    attacker.fieldKills = (attacker.fieldKills ?? 0) + 1;
+    const body = this.fieldKillBody(attacker);
+    if (!body) return;
+    body.fieldKills = (body.fieldKills ?? 0) + 1;
+  }
+
+  /** The driven soldier who should wear this kill. A guard's blow counts for the soldier they follow. */
+  private fieldKillBody(attacker: Unit): Unit | null {
+    if (this.isPlayerDriven(attacker)) return attacker;
+    if (attacker.guardUnitId == null || attacker.guardUnitId === attacker.id) return null;
+    const lead = this.state.units.find(
+      (u) => u.id === attacker.guardUnitId && u.team === attacker.team && u.hp > 0,
+    );
+    if (!lead || lead.id === attacker.id || !this.isPlayerDriven(lead)) return null;
+    return lead;
   }
 
   private outgoing(attacker: Unit, raw: number) {
@@ -6401,8 +6419,10 @@ export class GameSim {
     }
     if (u.attackTimer > 0) return;
     const ranged = u.kind === "archer";
+    const hpBefore = target.hp;
     const dealt = this.strikeDamage(u, target);
     target.hp -= dealt;
+    this.creditFieldKill(u, target, hpBefore);
     u.attackTimer = u.attackCooldown;
     this.emitCombat(ranged ? "arrow" : "meleeHit", u.pos, target.pos, team);
     this.addFloat(
@@ -6592,8 +6612,10 @@ export class GameSim {
   private strikeMilitaryInPlace(u: Unit, target: Unit | Villager, team: Team) {
     if (u.attackTimer > 0) return;
     const ranged = u.kind === "archer";
+    const hpBefore = target.hp;
     const dealt = this.strikeDamage(u, target);
     target.hp -= dealt;
+    this.creditFieldKill(u, target, hpBefore);
     u.attackTimer = u.attackCooldown;
     this.emitCombat(ranged ? "arrow" : "meleeHit", u.pos, target.pos, team);
     this.addFloat(`-${Math.round(dealt)}`, target.pos.x, target.pos.y - 7, ranged ? "#e8d39a" : "#ffd1cc");
@@ -7084,8 +7106,10 @@ export class GameSim {
       }
       if (best && u.attackTimer <= 0) {
         const ranged = u.kind === "archer";
+        const hpBefore = best.hp;
         const dealt = this.strikeDamage(u, best);
         best.hp -= dealt;
+        this.creditFieldKill(u, best, hpBefore);
         u.attackTimer = u.attackCooldown;
         this.emitCombat(ranged ? "arrow" : "meleeHit", u.pos, best.pos, team);
         this.addFloat(
@@ -7285,8 +7309,10 @@ export class GameSim {
         const target = rangedUnits[0] ?? rangedPeons[0];
         if (target) {
           if (u.attackTimer <= 0) {
+            const hpBefore = target.hp;
             const dealt = this.strikeDamage(u, target);
             target.hp -= dealt;
+            this.creditFieldKill(u, target, hpBefore);
             u.attackTimer = u.attackCooldown;
             this.emitCombat("arrow", u.pos, target.pos, team);
             this.addFloat(`-${Math.round(dealt)}`, target.pos.x, target.pos.y - 7, "#e8d39a");
@@ -7308,8 +7334,10 @@ export class GameSim {
         : undefined;
       if (meleeTarget) {
         if (u.attackTimer <= 0) {
+          const hpBefore = meleeTarget.hp;
           const dealt = this.meleeDamage(u, meleeTarget);
           meleeTarget.hp -= dealt;
+          this.creditFieldKill(u, meleeTarget, hpBefore);
           u.attackTimer = u.attackCooldown;
           this.emitCombat("meleeHit", u.pos, meleeTarget.pos, team);
           this.addFloat(`-${Math.round(dealt)}`, meleeTarget.pos.x, meleeTarget.pos.y - 6, "#ffd1cc");

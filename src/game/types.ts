@@ -182,7 +182,9 @@ export interface Unit {
    */
   humanOwned?: boolean;
   /**
-   * Kills this soldier scored while a human was driving it.
+   * Kills scored for this soldier while a human was driving it.
+   * The soldier's own blows count, and so do blows from units guard-following them.
+   * Enemy soldiers and peons count. Buildings do not.
    * The count stays across leaving and re-entering the body, and clears when the soldier dies.
    */
   fieldKills?: number;
