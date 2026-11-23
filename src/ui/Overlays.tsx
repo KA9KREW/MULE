@@ -190,7 +190,7 @@ export function Overlays({
                   {difficulty === "easy"
                     ? "Fewer troops. Levies and raiders lead, siege comes late, and you get longer to build."
                     : difficulty === "hard"
-                      ? "Denser waves, siege and elites much earlier, and shorter rests between them."
+                      ? "Both keeps get the same tougher march. Siege and elites come a little earlier, and the rests are shorter."
                       : "The standard arcade march."}
                 </p>
               </div>

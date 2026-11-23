@@ -11,6 +11,7 @@ interface FieldSitePanelProps {
   onTrain: (kind: TrainKind, buildingId: number) => void;
   onKeepTrain: (kind: KeepTrainKind) => void;
   onTemplar: (buildingId: number) => void;
+  onCathedral: (buildingId: number) => void;
   onChurch: (buildingId: number) => void;
   onMarket: (buildingId: number) => void;
   onTrade: (resource: "wood" | "gold", side: "buy" | "sell") => void;
@@ -79,6 +80,7 @@ export function FieldSitePanel({
   onTrain,
   onKeepTrain,
   onTemplar,
+  onCathedral,
   onChurch,
   onMarket,
   onTrade,
@@ -135,6 +137,7 @@ export function FieldSitePanel({
         onPress: () => {
           if (site.keep) onKeepTrain(choice.id as KeepTrainKind);
           else if (choice.id === "templar") onTemplar(site.buildingId);
+          else if (choice.id === "cathedral") onCathedral(site.buildingId);
           else onTrain(choice.id as TrainKind, site.buildingId);
         },
       });

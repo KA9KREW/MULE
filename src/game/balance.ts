@@ -71,7 +71,7 @@ export const CATHEDRAL_UPGRADE_WOOD = 1000;
  * Raider 6s sits with the rammer. Brute 8s sits between rammer and trebuchet.
  * Templar 12s is longer than the trebuchet.
  */
-export const RAIDER_TRAIN_GOLD = 75;
+export const RAIDER_TRAIN_GOLD = 40;
 export const RAIDER_TRAIN_WOOD = 25;
 export const RAIDER_TRAIN_TIME = 6;
 export const BRUTE_TRAIN_GOLD = 40;
@@ -263,6 +263,13 @@ export function templarRallyRadius(visionScore: number) {
  * Levy hits on every other target stay at the levy's normal damage.
  */
 export const LEVY_VS_WARD_DAMAGE = 1.25;
+/**
+ * Raider melee versus a watchtower, ballista, or catapult.
+ * 1.25 is +25%, the same size as a levy's bonus versus a ward.
+ */
+export const RAIDER_VS_TOWER_DAMAGE = 1.25;
+/** Share of a watchtower, ballista, or catapult shot a raider takes, after tower armor. */
+export const RAIDER_TOWER_TAKEN = 0.5;
 
 /**
  * A runner's first melee strike after closing in from outside contact.
@@ -399,6 +406,25 @@ export function towerDamageFactor(kind: BuildingKind, towerResist: number, unitK
   }
   const kept = kind === "ballista" ? towerResist * BALLISTA_ARMOR_KEPT : towerResist;
   return 1 - kept;
+}
+
+export function isTowerBuilding(kind: BuildingKind) {
+  return kind === "watchtower" || kind === "ballista" || kind === "catapult";
+}
+
+/**
+ * Raider defence versus tower shots, applied after armor.
+ * Keep arrows pass fromKeep and stay on the keep-attack path.
+ */
+export function raiderTowerShot(afterArmor: number, fromKeep: boolean, kind: BuildingKind) {
+  if (fromKeep || !isTowerBuilding(kind) || !Number.isFinite(afterArmor)) return afterArmor;
+  return afterArmor * RAIDER_TOWER_TAKEN;
+}
+
+/** Extra raider damage versus tower buildings. Aura and commander buffs apply after this. */
+export function raiderStrikeVsBuilding(damage: number, kind: BuildingKind) {
+  if (!isTowerBuilding(kind) || !Number.isFinite(damage)) return damage;
+  return damage * RAIDER_VS_TOWER_DAMAGE;
 }
 
 /** Melee chip against a barricade. Rams destroy one outright; archers walk around. */

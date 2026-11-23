@@ -291,8 +291,9 @@ function scaleCountsForLanes(
  * Plans a cohesive per-lane wave composition for any 1-based `waveNumber`
  * (Waves 1–12 follow iconic escalating themes; Waves 13+ scale endlessly
  * through 5 cycling tactical doctrines).
- * `normal` (the default) is that curve unchanged. `easy` and `hard` reshape
- * only an enemy arcade march: slower or faster doctrines, not a flat HP scale.
+ * `normal` (the default) is that curve unchanged. `easy` reshapes only the
+ * enemy march. `hard` uses one tougher march for both sides. Neither is a
+ * flat HP scale.
  */
 export function planWave(
   waveNumber: number,
@@ -305,26 +306,31 @@ export function planWave(
 }
 
 /**
- * South-keep waves stay on the normal roster. Easy/Hard replace only the north
- * (enemy) roster so a player's free wave troops are not buffed or nerfed.
+ * Easy keeps the player's free wave on the normal roster and only eases the
+ * enemy march. Hard sends both keeps the same roster and the same counts.
  */
 export function arcadeSidePlans(
   waveNumber: number,
   laneCount: number,
   difficulty: ArcadeDifficulty,
 ): { you: WavePlan; foe: WavePlan } {
+  if (difficulty === "hard") {
+    const shared = planWave(waveNumber, laneCount, "hard");
+    return { you: shared, foe: shared };
+  }
   const you = planWave(waveNumber, laneCount, "normal");
-  if (difficulty !== "easy" && difficulty !== "hard") return { you, foe: you };
-  return { you, foe: planWave(waveNumber, laneCount, difficulty) };
+  if (difficulty !== "easy") return { you, foe: you };
+  return { you, foe: planWave(waveNumber, laneCount, "easy") };
 }
 
 /** Opening gather and the rest after each clear. Normal returns the live constants. */
 export function arcadeTiming(difficulty: ArcadeDifficulty): { opening: number; between: number } {
   if (difficulty === "easy") return { opening: FIRST_BUILD + 14, between: BUILD_PAUSE + 10 };
   if (difficulty === "hard") {
+    // Shorter than Normal's 20s / 14s, and longer than the old 11s / 7s spike.
     return {
-      opening: Math.max(8, FIRST_BUILD - 9),
-      between: Math.max(6, Math.round(BUILD_PAUSE * 0.5)),
+      opening: Math.max(12, FIRST_BUILD - 4),
+      between: Math.max(8, BUILD_PAUSE - 4),
     };
   }
   return { opening: FIRST_BUILD, between: BUILD_PAUSE };
@@ -444,88 +450,54 @@ function shapeEasyCounts(raw: Partial<Record<UnitKind, number>>, target: number,
 }
 
 /**
- * Hard reads a later doctrine, forces elites and siege in early, then thickens
- * archers, wards, brutes, templars, and trebuchets. Endless pressure starts
- * at wave 7 instead of wave 13. Per-lane size stays under the endless lag cap.
+ * Hard opening, one lane. Siege and elites show up two waves before Normal:
+ * brutes on 4 (Normal 6), a ram on 5 (Normal 7), templars on 6 (Normal 8),
+ * a trebuchet on 8 (Normal 10). Counts stay a step above the same Normal wave
+ * and far under the 48-unit endless cap.
  */
-function hardSourceWave(waveNumber: number): number {
-  return Math.min(56, Math.max(waveNumber + 3, Math.round(waveNumber * 1.65) + 1));
-}
+const HARD_OPENING: readonly OpeningWaveTemplate[] = [
+  { theme: "Levy Militia", counts: { levy: 6 } },
+  { theme: "Archer Volley", counts: { levy: 2, archer: 6 } },
+  { theme: "Levy & Archer", counts: { levy: 5, raider: 2, archer: 3 } },
+  { theme: "Brute Shockwave", counts: { brute: 2, levy: 4, raider: 2, archer: 3 } },
+  { theme: "Battering Column", counts: { levy: 4, rammer: 1, ward: 2, runner: 1, archer: 4 } },
+  { theme: "Templar Vanguard", counts: { templar: 2, brute: 1, soldier: 2, ward: 2, runner: 2, archer: 4 } },
+  { theme: "Heavy Siege Push", counts: { brute: 2, levy: 4, rammer: 1, ward: 2, runner: 2, archer: 4 } },
+  { theme: "Trebuchet Battery", counts: { templar: 2, levy: 3, rammer: 1, trebuchet: 1, ward: 3, runner: 2, archer: 4 } },
+  { theme: "Grand Combined Arms", counts: { templar: 2, brute: 2, levy: 2, rammer: 2, ward: 3, runner: 2, archer: 5 } },
+  { theme: "Trebuchet Battery", counts: { templar: 2, levy: 4, rammer: 2, trebuchet: 1, ward: 4, runner: 3, archer: 5 } },
+  { theme: "Grand Combined Arms", counts: { templar: 3, brute: 2, levy: 2, rammer: 2, trebuchet: 1, ward: 4, runner: 3, archer: 6 } },
+  { theme: "Royal Siege Host", counts: { templar: 3, brute: 2, levy: 4, rammer: 2, trebuchet: 2, ward: 4, runner: 4, archer: 7 } },
+];
 
-const HARD_MULT: Partial<Record<UnitKind, number>> = {
-  archer: 1.6,
-  ward: 1.7,
-  brute: 1.55,
-  templar: 1.6,
-  trebuchet: 1.5,
-  rammer: 1.45,
-  runner: 1.25,
-  soldier: 1.15,
-  raider: 1.1,
-  levy: 1,
-};
-
-function scaledFloor(kind: UnitKind, oneLane: number, laneCount: number): number {
-  const spec: Partial<Record<UnitKind, number>> = { [kind]: oneLane };
-  return scaleCountsForLanes(spec, laneCount)[kind] ?? oneLane;
-}
-
-function seedHardRoster(raw: Partial<Record<UnitKind, number>>, waveNumber: number, laneCount: number) {
-  const bump = (kind: UnitKind, oneLane: number) => {
-    raw[kind] = Math.max(raw[kind] ?? 0, scaledFloor(kind, oneLane, laneCount));
-  };
-  if (waveNumber >= 2) bump("archer", 3);
-  if (waveNumber >= 3) {
-    bump("ward", 2);
-    bump("brute", 1);
-  }
-  if (waveNumber >= 4) {
-    bump("templar", 1);
-    bump("rammer", 1);
-  }
-  if (waveNumber >= 5) bump("trebuchet", 1);
-  if (waveNumber >= 7) {
-    bump("trebuchet", 2);
-    bump("templar", 2);
-    bump("brute", 2);
-    bump("archer", 5);
-    bump("ward", 3);
-  }
-}
-
+/**
+ * After the opening, Hard reads the Normal march two waves ahead and keeps
+ * the headcount near 1.2× that same wave. The endless lane cap is a late
+ * ceiling, not an early target. Both sides share this plan.
+ */
 function planHardWave(waveNumber: number, laneCount: number): WavePlan {
   const n = Math.max(1, Math.floor(waveNumber));
+  if (n <= HARD_OPENING.length) {
+    const spec = HARD_OPENING[n - 1]!;
+    return buildWavePlan(n, spec.theme, scaleCountsForLanes(spec.counts, laneCount));
+  }
   const normal = planNormalWave(n, laneCount);
-  const source = planNormalWave(hardSourceWave(n), laneCount);
-  const raw = copyCounts(source.counts);
-  seedHardRoster(raw, n, laneCount);
-  for (const kind of Object.keys(raw) as UnitKind[]) {
-    const next = Math.round((raw[kind] ?? 0) * (HARD_MULT[kind] ?? 1));
-    if (next > 0) raw[kind] = next;
-    else delete raw[kind];
-  }
-  for (const kind of Object.keys(raw) as UnitKind[]) {
-    const cap = ROLE_LANE_CAPS[kind];
-    if (cap !== undefined && (raw[kind] ?? 0) > cap) raw[kind] = cap;
-  }
-
+  const ahead = planNormalWave(n + 2, laneCount);
+  const raw = copyCounts(ahead.counts);
   const normalTotal = normal.roster.length;
-  const floorTotal = Math.min(
-    MAX_ENDLESS_LANE_UNITS,
-    Math.max(normalTotal + 2, Math.ceil(normalTotal * 1.65)),
-  );
+  const floorTotal = Math.min(MAX_ENDLESS_LANE_UNITS, normalTotal + 3);
   const ceilTotal = Math.min(
     MAX_ENDLESS_LANE_UNITS,
-    Math.max(floorTotal, Math.ceil(normalTotal * 2.2)),
+    Math.max(floorTotal, Math.ceil(normalTotal * 1.2)),
   );
   fitRoster(
     raw,
     floorTotal,
     ceilTotal,
-    ["levy", "raider", "soldier", "runner", "archer", "ward", "brute", "rammer", "templar", "trebuchet"],
-    ["archer", "ward", "brute", "templar", "trebuchet", "rammer", "runner", "soldier", "raider", "levy"],
+    ["levy", "raider", "soldier", "runner", "archer", "ward", "brute", "templar", "rammer", "trebuchet"],
+    ["archer", "levy", "ward", "runner", "soldier", "brute", "templar", "rammer"],
   );
-  return buildWavePlan(n, themeFromCounts(raw), raw);
+  return buildWavePlan(n, ahead.theme, raw);
 }
 
 function copyCounts(counts: Partial<Record<UnitKind, number>>): Partial<Record<UnitKind, number>> {

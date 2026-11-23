@@ -2276,6 +2276,11 @@ export default function App() {
                   refreshUi();
                   beep(360);
                 }}
+                onCathedral={(buildingId) => {
+                  sim.fieldRaiseCathedral(buildingId);
+                  refreshUi();
+                  beep(500);
+                }}
                 onChurch={(buildingId) => {
                   sim.fieldConsecrate(buildingId);
                   refreshUi();

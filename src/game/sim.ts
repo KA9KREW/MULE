@@ -48,6 +48,8 @@ import {
   buildingPickFootprint,
   MID_HOUSE_ARMY_POP,
   LEVY_VS_WARD_DAMAGE,
+  raiderStrikeVsBuilding,
+  raiderTowerShot,
   MAX_PEON_QUEUE,
   MAX_TRAIN_QUEUE,
   AGGRO_LEASH_MULT,
@@ -3427,8 +3429,8 @@ export class GameSim {
     }
 
     const waveNumber = index + 1;
-    // Arcade spawns a mirrored march for both keeps. The south roster stays the
-    // normal plan; Easy/Hard change only the north (enemy) roster and timing.
+    // Arcade spawns a march for both keeps. Easy eases only the enemy roster.
+    // Hard uses one roster for both sides. Timing follows the same difficulty.
     const { you: youPlan, foe: foePlan } = arcadeSidePlans(waveNumber, lanes.length, this.enemyWaveDifficulty());
     const laneBatches = lanes.map((lane) => {
       const youAnchor = { x: lanePathX(this.activeMap.seed, "you", lane, youY), y: youY };
@@ -4375,8 +4377,13 @@ export class GameSim {
   raiseSelectedCathedral() {
     const id = this.state.selectedBuildingId;
     if (id == null) return false;
-    if (this.redirect({ t: "cathedral", team: this.localTeam, buildingId: id })) return true;
-    return this.raiseCathedral(this.localTeam, id);
+    return this.fieldRaiseCathedral(id);
+  }
+
+  /** Same cathedral upgrade, for the church under a fielded soldier. */
+  fieldRaiseCathedral(buildingId: number) {
+    if (this.redirect({ t: "cathedral", team: this.localTeam, buildingId })) return true;
+    return this.raiseCathedral(this.localTeam, buildingId);
   }
 
   private raiseCathedral(team: Team, buildingId: number) {
@@ -5401,8 +5408,10 @@ export class GameSim {
 
   private applyTowerDamage(u: Unit, raw: number, kind: BuildingKind, source: "tower" | "keep" = "tower") {
     let dmg = raw * towerDamageFactor(kind, u.towerResist, u.kind);
+    const fromKeep = source === "keep";
     const defensiveBuilding =
-      source === "tower" && (kind === "watchtower" || kind === "ballista" || kind === "catapult");
+      !fromKeep && (kind === "watchtower" || kind === "ballista" || kind === "catapult");
+    if (u.kind === "raider") dmg = raiderTowerShot(dmg, fromKeep, kind);
     dmg = this.incoming(u, dmg, defensiveBuilding);
     u.hp -= dmg;
     return dmg;
@@ -6007,6 +6016,7 @@ export class GameSim {
     let dmg = Math.max(4, u.damage);
     if (u.kind === "rammer") dmg *= u.keepMult;
     else if (u.kind === "archer") dmg *= 0.65;
+    if (u.kind === "raider") dmg = raiderStrikeVsBuilding(dmg, b.kind);
     if (this.inChurchAura(u)) dmg *= CHURCH_AURA_DAMAGE;
     dmg = this.outgoing(u, dmg);
     b.hp -= dmg;
@@ -8988,6 +8998,30 @@ export class GameSim {
       const def = UNIT_DEFS.templar;
       const g = def.cost ?? 0;
       const w = def.woodCost ?? 0;
+      const keepUp = s.keeps[view].upgraded === true;
+      const choices = b.cathedral
+        ? [
+            {
+              id: "templar",
+              label: def.label,
+              gold: g,
+              wood: w,
+              enabled: afford(g, w) && room,
+              price: this.costText(g, w),
+            },
+          ]
+        : keepUp
+          ? [
+              {
+                id: "cathedral",
+                label: "Raise cathedral",
+                gold: CATHEDRAL_UPGRADE_GOLD,
+                wood: CATHEDRAL_UPGRADE_WOOD,
+                enabled: afford(CATHEDRAL_UPGRADE_GOLD, CATHEDRAL_UPGRADE_WOOD),
+                price: this.costText(CATHEDRAL_UPGRADE_GOLD, CATHEDRAL_UPGRADE_WOOD),
+              },
+            ]
+          : [];
       return {
         kind: "train",
         buildingId: b.id,
@@ -8995,18 +9029,7 @@ export class GameSim {
         title: b.cathedral ? "Cathedral" : "Church",
         rally: b.commanderRally === true,
         multi: false,
-        choices: b.cathedral
-          ? [
-              {
-                id: "templar",
-                label: def.label,
-                gold: g,
-                wood: w,
-                enabled: afford(g, w) && room,
-                price: this.costText(g, w),
-              },
-            ]
-          : [],
+        choices,
         freeLines: ["Soldier · free", "Templar · free"],
       };
     }

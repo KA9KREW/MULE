@@ -447,15 +447,17 @@ export function DetailSheet({
         </p>
       )}
       {isChurch && !isEnemy && !ui.selectedIsCathedral && ui.keepUpgraded && (
-        <button
-          type="button"
-          className="cta"
-          disabled={!ui.selectedCanRaiseCathedral}
-          onClick={onRaiseCathedral}
-          title={`${ui.cathedralUpgradeCost.gold} gold and ${ui.cathedralUpgradeCost.wood} wood — queue templars here`}
-        >
-          Raise cathedral · {costLabel(ui.cathedralUpgradeCost.gold, ui.cathedralUpgradeCost.wood)}
-        </button>
+        <div className="train-options">
+          <button
+            type="button"
+            className={`train-opt${ui.selectedCanRaiseCathedral ? " afford" : ""}`}
+            disabled={!ui.selectedCanRaiseCathedral}
+            onClick={onRaiseCathedral}
+          >
+            <strong>Raise cathedral</strong>
+            <em>{costLabel(ui.cathedralUpgradeCost.gold, ui.cathedralUpgradeCost.wood)}</em>
+          </button>
+        </div>
       )}
       {ui.selectedIsCathedral && !isEnemy && (
         <>
