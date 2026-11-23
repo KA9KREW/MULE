@@ -8,6 +8,10 @@ import type {
   Lane,
   MapDef,
   KeepTrainKind,
+  PartnerCall,
+  PartnerMode,
+  PartnerTrainId,
+  PartnerUpgradeId,
   Team,
   SiegePhase,
   TrainKind,
@@ -74,6 +78,20 @@ export type RemoteOrder =
   | { t: "unitHold"; team: Team; ids: number[]; hold: boolean }
   | { t: "unitStop"; team: Team; ids: number[] }
   | { t: "unitRelease"; team: Team; ids: number[] }
+  /** Human + CPU assistant. Only the peer who runs the match applies these to the army and the build list. */
+  | { t: "partnerMode"; team: Team; mode: PartnerMode }
+  | {
+      t: "partnerPush";
+      team: Team;
+      id: number;
+      kind: "train" | "upgrade";
+      unit?: PartnerTrainId;
+      site?: PartnerUpgradeId;
+    }
+  | { t: "partnerCancel"; team: Team; id: number }
+  | { t: "partnerRelease"; team: Team; ids: number[] }
+  | { t: "partnerClaim"; team: Team; ids: number[] }
+  | { t: "partnerFocus"; team: Team; id: number | null }
   | { t: "duelPropose"; team: Team }
   | { t: "duelAccept"; team: Team }
   | { t: "duelDecline"; team: Team };
@@ -243,6 +261,8 @@ export interface MatchSnapshot {
    * Absent on skirmish and arcade pictures.
    */
   company?: CompanySetup;
+  /** Human + CPU mode and call list. Absent on arcade and skirmish pictures. */
+  partner?: Record<Team, { mode: PartnerMode; queue: PartnerCall[] }>;
   /** Skirmish Final Duel status. */
   finalDuel?: {
     phase: "off" | "proposed" | "active";
@@ -355,6 +375,12 @@ const ORDER_TYPES = new Set<RemoteOrder["t"]>([
   "unitHold",
   "unitStop",
   "unitRelease",
+  "partnerMode",
+  "partnerPush",
+  "partnerCancel",
+  "partnerRelease",
+  "partnerClaim",
+  "partnerFocus",
   "duelPropose",
   "duelAccept",
   "duelDecline",

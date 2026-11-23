@@ -210,6 +210,7 @@ function doctrineCommander(sim: GameSim, team: Team) {
   sim.aiAssignWorkers(team, plan.resourceBias);
   if (sim.peonSlotsUsed(team) < sim.peonCap(team)) sim.enqueuePeon(team);
 
+  const savingForPartner = sim.partnerIsSaving(team);
   const savingForChurch = plan.ecoGoal === "church";
   const savingForDogs = plan.ecoGoal === "guard-dogs";
   const savingForTrebGold =
@@ -223,7 +224,9 @@ function doctrineCommander(sim: GameSim, team: Team) {
   const freeGold = state.gold[team] - plan.reserveGold;
   const freeWood = state.wood[team] - plan.reserveWood;
 
-  if (plan.emergencyDefend && ballistas.length < 1) {
+  if (savingForPartner) {
+    // The human's call is short of its next cost. Keep gathering; do not start a discretionary build.
+  } else if (plan.emergencyDefend && ballistas.length < 1) {
     sim.placeAiBuilding("ballista", 0, team);
   } else if (yard < 1) sim.placeAiBuilding("house", 0, team, "eco");
   else if (tune.ecoFirst >= 1 && yard < ecoPads) sim.placeAiBuilding("house", 0, team, "eco");
@@ -259,15 +262,16 @@ function doctrineCommander(sim: GameSim, team: Team) {
     tune.barricades >= 1 &&
     !savingForChurch &&
     !savingForTrebGold &&
+    !savingForPartner &&
     (plan.emergencyDefend || intel.approachingHome >= 4 || state.waveIndex >= 2) &&
     ballistas.length >= 1
   ) {
     sim.aiBuildDefensiveBarricade(team);
   }
-  if (plan.needGuardDogs && needsGuardDogUpgrade) {
+  if (!savingForPartner && plan.needGuardDogs && needsGuardDogUpgrade) {
     sim.aiUpgradeDefense("rate", team);
   }
-  if (ecoFull && !savingForChurch && !savingForDogs && !savingForTrebGold) {
+  if (ecoFull && !savingForChurch && !savingForDogs && !savingForTrebGold && !savingForPartner) {
     sim.aiUpgradeBarracks(team);
   }
   const defenses = [...ballistas, ...catapults];
@@ -275,6 +279,7 @@ function doctrineCommander(sim: GameSim, team: Team) {
     !savingForChurch &&
     !savingForDogs &&
     !savingForTrebGold &&
+    !savingForPartner &&
     defenses.some((b) => b.damageRank < 2 || b.rateRank < 2) &&
     Math.max(freeGold, state.gold[team] - 160) >= 0 &&
     state.gold[team] >= 160 + (plan.ecoGoal === "trebuchet" ? 150 : 0)
@@ -283,7 +288,7 @@ function doctrineCommander(sim: GameSim, team: Team) {
   }
 
   const needFirstSiege = ecoFull && intel.defenseTowers >= 2 && trebs === 0 && rams === 0;
-  if (barracks >= 1) {
+  if (barracks >= 1 && !savingForPartner && !sim.partnerHoldsTraining(team)) {
     const tick = Math.floor(state.time / 3);
     if (!ecoFull) {
       const needEarly =
@@ -331,8 +336,13 @@ function doctrineCommander(sim: GameSim, team: Team) {
     }
   }
 
-  sim.setDefendLayer(plan.desiredLayer, team);
-  runDoctrineMicro(sim, team, plan);
+  const partnerMode = sim.assistedPartnerMode(team);
+  if (partnerMode === "reinforce") sim.reinforceUnclaimed(team);
+  else if (partnerMode === "hold") sim.holdUnclaimedLine(team);
+  else if (partnerMode !== "handsOff") {
+    sim.setDefendLayer(plan.desiredLayer, team);
+    runDoctrineMicro(sim, team, plan);
+  }
 }
 
 const COMMANDERS: Record<AiStyle, (sim: GameSim, team: Team) => void> = {
@@ -344,6 +354,7 @@ const COMMANDERS: Record<AiStyle, (sim: GameSim, team: Team) => void> = {
 };
 
 export function runAiTurn(sim: GameSim, _reserve: number, team: Team = "foe", style: AiStyle = bestSelfPlayStyle()) {
+  if (sim.isAssistedKeep(team)) sim.advancePartnerQueue(team);
   COMMANDERS[style](sim, team);
 }
 

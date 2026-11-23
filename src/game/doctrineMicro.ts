@@ -50,7 +50,7 @@ export function runDoctrineMicro(sim: GameSim, team: Team, plan: AdaptivePlan) {
   const s = sim.getState();
   const enemy: Team = team === "foe" ? "you" : "foe";
   const myUnits = s.units.filter(
-    (u) => u.team === team && u.fromBarracks && u.hp > 0 && !sim.isDrivenUnit(u.id),
+    (u) => u.team === team && u.fromBarracks && u.hp > 0 && sim.cpuMayCommand(u),
   );
   if (myUnits.length === 0) return;
 

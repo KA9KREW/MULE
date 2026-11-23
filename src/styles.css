@@ -1780,6 +1780,7 @@ button:disabled {
 }
 
 .sheet-dock .field-site .train-opt,
+.sheet-dock .partner-box .train-opt,
 .field-site .train-opt {
   display: flex;
   flex-direction: column;
@@ -1792,6 +1793,7 @@ button:disabled {
 }
 
 .sheet-dock .field-site .train-opt strong,
+.sheet-dock .partner-box .train-opt strong,
 .field-site .train-opt strong {
   display: block;
   max-width: 100%;
@@ -1801,6 +1803,7 @@ button:disabled {
 }
 
 .sheet-dock .field-site .train-opt em,
+.sheet-dock .partner-box .train-opt em,
 .field-site .train-opt em {
   display: block;
   white-space: nowrap;
@@ -1854,6 +1857,31 @@ button:disabled {
   color: #cbb892;
   font-size: 11px;
   line-height: 1.35;
+}
+
+.sheet-dock .partner-box {
+  flex: 0 1 auto;
+  max-height: 42%;
+  overflow: auto;
+  padding: 8px;
+  gap: 6px;
+}
+
+.sheet-dock:has(.partner-box) .sheet-slot {
+  height: auto;
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+.partner-doing {
+  margin: 0;
+  color: #ffe7ad;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.partner-box .train-opt.on {
+  box-shadow: inset 4px 0 0 #9d7cff;
 }
 
 .field-pad {
@@ -1919,6 +1947,14 @@ button:disabled {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.sheet-dock .partner-box:not(.collapsed) {
+  flex: 0 1 auto;
+  max-height: 42%;
+  overflow: auto;
+  padding: 8px;
+  gap: 6px;
 }
 
 .sheet-dock .sheet-float:not(.collapsed) .detail-body {

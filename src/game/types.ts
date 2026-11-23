@@ -3,6 +3,18 @@ export type WaveUnitKind = "raider" | "soldier" | "brute" | "runner" | "ward";
 export type TrainKind = "levy" | "runner" | "archer" | "ward" | "rammer" | "trebuchet" | "spy";
 /** Trained at an upgraded keep. Not a barracks train kind. */
 export type KeepTrainKind = "raider" | "brute";
+/** Human + CPU assistant. One mode at a time. Default is hands off. */
+export type PartnerMode = "handsOff" | "reinforce" | "hold" | "lead";
+/** Barracks trains, keep trains, and cathedral templars. */
+export type PartnerTrainId = TrainKind | KeepTrainKind | "templar";
+/** Base upgrades the assistant can be told to finish before its own plan. */
+export type PartnerUpgradeId = "keep" | "market" | "cathedral" | "church";
+export interface PartnerCall {
+  id: number;
+  kind: "train" | "upgrade";
+  unit?: PartnerTrainId;
+  site?: PartnerUpgradeId;
+}
 export type SiegePhase = "packed" | "unpacking" | "ready" | "packing";
 /** Templars queue at a cathedral, not at barracks. Arena starter uses peon. */
 export type UnitKind = WaveUnitKind | TrainKind | "templar" | "peon";
@@ -164,6 +176,11 @@ export interface Unit {
   holdPosition?: boolean;
   /** True when the player issued a direct micro order (move/guard/attack/patrol/hold). */
   manualOrder?: boolean;
+  /**
+   * Human + CPU only. Set when this player orders the troop, control-groups it, or possesses it.
+   * Stays set until Release to CPU. The assistant never commands these troops.
+   */
+  humanOwned?: boolean;
 }
 
 /** First-person body the local player is driving, or none. */
@@ -555,6 +572,16 @@ export interface SelectedArmyUi {
   canPossess: boolean;
 }
 
+export interface PartnerUi {
+  mode: PartnerMode;
+  /** Top of the partner list, such as "Upgrade keep" or "Train archer". Null when the list is empty. */
+  active: string | null;
+  queue: { id: number; label: string }[];
+  modes: { id: PartnerMode; label: string }[];
+  calls: { token: string; label: string; price: string; enabled: boolean }[];
+  canRelease: boolean;
+}
+
 export interface UiSnapshot {
   phase: GamePhase;
   mapId: MapId;
@@ -687,6 +714,8 @@ export interface UiSnapshot {
   possessed: PossessedUi | null;
   /** Build, train, church/market choice, or market trades under the fielded unit. */
   fieldSite: FieldSiteUi | null;
+  /** Human + CPU assistant for this keep. Null for a human keep, a pure CPU keep, and observers. */
+  partner: PartnerUi | null;
   /** This keep's exchange prices. */
   marketQuotes: MarketQuotes;
   /** Purple midfield house can still be raised into a market. */

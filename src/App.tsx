@@ -14,6 +14,7 @@ import { Hud } from "./ui/Hud";
 import { BuildBar } from "./ui/BuildBar";
 import { DetailSheet } from "./ui/DetailSheet";
 import { FieldSitePanel } from "./ui/FieldSitePanel";
+import { PartnerBox } from "./ui/PartnerBox";
 import { KeepTugBar } from "./ui/KeepTugBar";
 import { Overlays } from "./ui/Overlays";
 import { CampaignMap } from "./ui/CampaignMap";
@@ -136,6 +137,7 @@ const defaultUi: UiSnapshot = {
   freshHold: false,
   possessed: null,
   fieldSite: null,
+  partner: null,
   marketQuotes: { woodBuy: 100, woodSell: 70, goldBuy: 100, goldSell: 70 },
   selectedCanRaiseMarket: false,
   defendLayer: null,
@@ -2328,6 +2330,31 @@ export default function App() {
             </p>
           )}
           <div className="sheet-dock">
+            {!spectating && ui.partner && (
+              <PartnerBox
+                partner={ui.partner}
+                keys={!!ui.possessed && !ui.fieldSite}
+                onMode={(mode) => {
+                  sim.setPartnerMode(mode);
+                  refreshUi();
+                }}
+                onCall={(token) => {
+                  sim.pushPartnerCall(token);
+                  refreshUi();
+                  beep(340);
+                }}
+                onCancel={(id) => {
+                  sim.cancelPartnerCall(id);
+                  refreshUi();
+                  beep(200);
+                }}
+                onRelease={() => {
+                  sim.releaseSelectedToCpu();
+                  refreshUi();
+                  beep(280);
+                }}
+              />
+            )}
             <div className="sheet-slot">
             {!spectating && ui.fieldSite && (
               <FieldSitePanel

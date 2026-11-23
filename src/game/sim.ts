@@ -200,11 +200,22 @@ import type {
   Team,
   TrainKind,
   UiSnapshot,
+  PartnerCall,
+  PartnerMode,
   Unit,
   UnitKind,
   Vec2,
   Villager,
 } from "./types";
+import {
+  PARTNER_MODE_CHOICES,
+  PARTNER_QUEUE_CAP,
+  partnerCallLabel,
+  partnerCallUsable,
+  partnerChoices,
+  partnerModeUsable,
+  partnerTokenUsable,
+} from "./partner";
 
 function dist(a: { x: number; y: number }, b: { x: number; y: number }) {
   return Math.hypot(a.x - b.x, a.y - b.y);
@@ -284,6 +295,13 @@ export class GameSim {
   private arcadeDifficulty: ArcadeDifficulty = "normal";
   /** Company match. Null for arcade, campaign, and skirmish. */
   private company: CompanySetup | null = null;
+  /** Human + CPU assistant. Ignored unless that keep's seat is assisted. */
+  private partnerMode: Record<Team, PartnerMode> = { you: "handsOff", foe: "handsOff" };
+  private partnerQueue: Record<Team, PartnerCall[]> = { you: [], foe: [] };
+  private partnerFocus: Record<Team, number | null> = { you: null, foe: null };
+  private partnerSaving: Record<Team, boolean> = { you: false, foe: false };
+  private partnerSeq = 1;
+  private lastPartnerFocus: number | null | undefined = undefined;
   private campaignMission: CampaignMission | null = null;
   private lastUnlock = "";
   /** True when the match that just ended was the first time that march was held. */
@@ -579,7 +597,7 @@ export class GameSim {
           u.hp > 0 &&
           u.fromBarracks &&
           u.kind !== "trebuchet" &&
-          !this.isPlayerDriven(u) &&
+          this.cpuMayCommand(u) &&
           (includeManual ? u.guardUnitId == null : !u.manualOrder),
       )
       .sort((a, b) => a.id - b.id);
@@ -595,7 +613,7 @@ export class GameSim {
           u.team === team &&
           u.kind === "trebuchet" &&
           u.fromBarracks &&
-          !this.isPlayerDriven(u) &&
+          this.cpuMayCommand(u) &&
           u.hp > 0 &&
           (includeManual ? u.guardUnitId == null : !u.manualOrder),
       )
@@ -842,6 +860,7 @@ export class GameSim {
 
   clearCompany() {
     this.company = null;
+    this.resetPartner();
     this.customDoctrineTune = { you: false, foe: false };
     this.cpuStyle = { you: "reactive", foe: bestSelfPlayStyle() };
   }
@@ -855,6 +874,38 @@ export class GameSim {
   isDrivenUnit(id: number) {
     const unit = this.state.units.find((u) => u.id === id);
     return !!unit && this.isPlayerDriven(unit);
+  }
+
+  /** True when this keep is the Human + CPU assistant, not a pure CPU opponent. */
+  isAssistedKeep(team: Team) {
+    return this.company?.sides[team] === "assisted";
+  }
+
+  /**
+   * Army orders the assistant may issue. Pure CPU and arcade troops are unchanged.
+   * A human-owned troop stays with the player until Release to CPU.
+   */
+  cpuMayCommand(u: Unit) {
+    if (this.isPlayerDriven(u)) return false;
+    if (u.humanOwned) return false;
+    return true;
+  }
+
+  /** Null when this keep is not Human + CPU. */
+  assistedPartnerMode(team: Team): PartnerMode | null {
+    if (!this.isAssistedKeep(team)) return null;
+    return this.partnerMode[team];
+  }
+
+  /** The top partner call is short of its next gold or wood cost. */
+  partnerIsSaving(team: Team) {
+    return this.isAssistedKeep(team) && this.partnerSaving[team];
+  }
+
+  /** A train call is still on top, so discretionary barracks training waits for it. */
+  partnerHoldsTraining(team: Team) {
+    if (!this.isAssistedKeep(team)) return false;
+    return this.partnerQueue[team][0]?.kind === "train";
   }
 
   private applyCompanyDifficulty() {
@@ -1025,6 +1076,7 @@ export class GameSim {
       }
     }
     this.stepPoses(elapsed);
+    this.syncPartnerFocus();
   }
 
   /**
@@ -1062,6 +1114,22 @@ export class GameSim {
     if (order.t === "pause" || order.t === "speed" || order.t === "rush") return;
     if (!("team" in order) || order.team !== this.localTeam) return;
     const team = this.localTeam;
+    if (order.t === "partnerMode") {
+      this.applyPartnerMode(team, order.mode, false);
+      return;
+    }
+    if (order.t === "partnerPush") {
+      this.applyPartnerPush(team, { id: order.id, kind: order.kind, unit: order.unit, site: order.site });
+      return;
+    }
+    if (order.t === "partnerCancel") {
+      this.applyPartnerCancel(team, order.id);
+      return;
+    }
+    if (order.t === "partnerRelease") {
+      this.applyPartnerRelease(team, order.ids, false);
+      return;
+    }
     if (order.t === "recall") {
       this.previewRecall(team);
       return;
@@ -1326,6 +1394,7 @@ export class GameSim {
     this.state.phase = "running";
     this.state.wavePhase = "build";
     if (this.company) {
+      this.resetPartner();
       this.applyCompanyDifficulty();
       const timing = companyTiming(this.company);
       this.state.buildTimer = timing.opening;
@@ -1494,6 +1563,7 @@ export class GameSim {
     this.state.audioUnlocked = audioUnlocked;
     this.state.phase = "running";
     this.state.paused = this.linkDown;
+    this.resetPartner();
     if (this.company) {
       this.applyCompanyDifficulty();
       this.state.buildTimer = companyTiming(this.company).opening;
@@ -1590,6 +1660,7 @@ export class GameSim {
       this.addToast(`Taking the field — ${UNIT_DEFS[u.kind].label}. Esc returns.`);
       return true;
     }
+    this.claimHumanTroops(u.team, [u.id]);
     this.rememberDriven(this.localPlayerId, u.id);
     s.possessedId = u.id;
     s.speed = 1;
@@ -2430,6 +2501,7 @@ export class GameSim {
     }
     if (!silent) {
       this.state.commandMarkers.push({ id: this.next(), kind: "move", pos: { ...dest }, life: 1.1 });
+      this.claimHumanTroops(team, squad.map((u) => u.id));
     }
     return true;
   }
@@ -2450,6 +2522,7 @@ export class GameSim {
     if (!silent) {
       this.state.commandMarkers.push({ id: this.next(), kind: "guard", pos: { ...guarded.pos }, life: 1.2 });
       this.tell(team, `Guarding ${UNIT_DEFS[guarded.kind].label}`);
+      this.claimHumanTroops(team, escorts.map((u) => u.id));
     }
     return true;
   }
@@ -2492,6 +2565,7 @@ export class GameSim {
     }
     if (!silent) {
       this.state.commandMarkers.push({ id: this.next(), kind: "attack", pos: { ...target.pos }, life: 1.1 });
+      this.claimHumanTroops(team, squad.map((u) => u.id));
     }
     return true;
   }
@@ -2510,6 +2584,7 @@ export class GameSim {
     }
     if (!silent) {
       this.state.commandMarkers.push({ id: this.next(), kind: "attack", pos: { ...b.pos }, life: 1.1 });
+      this.claimHumanTroops(team, squad.map((u) => u.id));
     }
     return true;
   }
@@ -2528,6 +2603,7 @@ export class GameSim {
     }
     if (!silent) {
       this.state.commandMarkers.push({ id: this.next(), kind: "attack", pos: { ...bar.pos }, life: 1.1 });
+      this.claimHumanTroops(team, squad.map((u) => u.id));
     }
     return true;
   }
@@ -2544,6 +2620,7 @@ export class GameSim {
     }
     if (!silent) {
       this.state.commandMarkers.push({ id: this.next(), kind: "attack", pos: { ...enemyKeep.pos }, life: 1.1 });
+      this.claimHumanTroops(team, squad.map((u) => u.id));
     }
     return true;
   }
@@ -2564,6 +2641,7 @@ export class GameSim {
       u.lane = this.nearestLaneFor(team, u.patrolB);
     }
     this.state.commandMarkers.push({ id: this.next(), kind: "patrol", pos: { ...dest }, life: 1.1 });
+    this.claimHumanTroops(team, squad.map((u) => u.id));
     return true;
   }
 
@@ -2577,6 +2655,7 @@ export class GameSim {
       u.rallyPoint = { ...u.pos };
     }
     this.tell(team, hold ? "Holding position." : "Hold position cleared.");
+    this.claimHumanTroops(team, squad.map((u) => u.id));
     return true;
   }
 
@@ -2590,6 +2669,7 @@ export class GameSim {
       u.rallyPoint = { ...u.pos };
     }
     this.tell(team, "Selected units stopped.");
+    this.claimHumanTroops(team, squad.map((u) => u.id));
     return true;
   }
 
@@ -2613,8 +2693,13 @@ export class GameSim {
     if (this.observer) return false;
     if (assign) {
       if (this.state.selectedUnitIds.length > 0) {
-        this.controlGroups.set(slot, { kind: "units", ids: [...this.state.selectedUnitIds] });
-        this.addToast(`Control group ${slot} set (${this.state.selectedUnitIds.length} troops).`);
+        const ids = [...this.state.selectedUnitIds];
+        this.controlGroups.set(slot, { kind: "units", ids });
+        this.claimHumanTroops(this.localTeam, ids);
+        if (this.orderSink && !this.applyingRemote && this.isAssistedKeep(this.localTeam)) {
+          this.orderSink({ t: "partnerClaim", team: this.localTeam, ids });
+        }
+        this.addToast(`Control group ${slot} set (${ids.length} troops).`);
         return true;
       }
       if (this.state.selectedVillagerIds.length > 0) {
@@ -3082,8 +3167,7 @@ export class GameSim {
       if (b.churchLevyTimer <= 0) {
         if (this.armySlotsUsed(b.team) < this.armyCap(b.team)) {
           this.spawnUnit(b.team, "soldier", this.pickLane(b.team), true, undefined, undefined, b);
-          const layer = this.state.defendLayer[b.team];
-          if (layer) this.assignDefendRallies(b.team, layer, true);
+          this.rallyFreshTroops(b.team);
           b.churchLevyTimer = CHURCH_LEVY_INTERVAL;
         } else {
           b.churchLevyTimer = 0;
@@ -3092,8 +3176,7 @@ export class GameSim {
       if (b.churchTemplarTimer <= 0) {
         if (this.armySlotsUsed(b.team) < this.armyCap(b.team)) {
           this.spawnUnit(b.team, "templar", this.pickLane(b.team), true, undefined, undefined, b);
-          const layer = this.state.defendLayer[b.team];
-          if (layer) this.assignDefendRallies(b.team, layer, true);
+          this.rallyFreshTroops(b.team);
           b.churchTemplarTimer = CHURCH_TEMPLAR_INTERVAL;
         } else {
           b.churchTemplarTimer = 0;
@@ -3263,8 +3346,7 @@ export class GameSim {
       if (job.timeLeft > 0) continue;
       this.spawnUnit(team, job.kind, this.pickLane(team), true, undefined, undefined, keep);
       keep.troopQueue.shift();
-      const layer = this.state.defendLayer[team];
-      if (layer) this.assignDefendRallies(team, layer, true);
+      this.rallyFreshTroops(team);
     }
   }
 
@@ -3279,8 +3361,7 @@ export class GameSim {
       if (job.timeLeft > 0) continue;
       this.spawnUnit(b.team, "templar", this.pickLane(b.team), true, b, undefined, b);
       queue.shift();
-      const layer = this.state.defendLayer[b.team];
-      if (layer) this.assignDefendRallies(b.team, layer, true);
+      this.rallyFreshTroops(b.team);
     }
   }
 
@@ -3344,7 +3425,9 @@ export class GameSim {
       damage *= DAMAGE_MULT[barracks.damageRank];
       cooldown *= RATE_MULT[barracks.rateRank];
     }
-    const holdLayer = fromBarracks ? this.state.defendLayer[team] : null;
+    const assisted = this.assistedPartnerMode(team);
+    const holdLayer =
+      fromBarracks && assisted !== "handsOff" && assisted !== "reinforce" ? this.state.defendLayer[team] : null;
     const aiHeldForRush =
       this.matchMode === "ai" && team === "foe" && fromBarracks && !holdLayer;
     const stagingY = 138 + lane * 8;
@@ -5712,8 +5795,7 @@ export class GameSim {
       if (job.timeLeft > 0) continue;
       this.spawnUnit(team, job.kind, this.pickLane(team), true, b);
       b.queue.shift();
-      const layer = this.state.defendLayer[team];
-      if (layer) this.assignDefendRallies(team, layer, true);
+      this.rallyFreshTroops(team);
     }
   }
 
@@ -7631,6 +7713,7 @@ export class GameSim {
 
     if (s.phase !== "running" || s.paused) return;
 
+    this.syncPartnerFocus();
     s.time += dt;
 
     if (this.matchMode === "arena" || this.state.arena?.duel) {
@@ -7883,7 +7966,7 @@ export class GameSim {
 
   aiCoordinateRush(skill: number, team: Team = "foe") {
     const held = this.state.units.filter(
-      (u) => u.team === team && u.fromBarracks && u.aiHeldForRush && u.hp > 0 && !this.isPlayerDriven(u),
+      (u) => u.team === team && u.fromBarracks && u.aiHeldForRush && u.hp > 0 && this.cpuMayCommand(u),
     );
     if (held.length === 0) {
       this.aiRushDeadline[team] = 0;
@@ -8079,6 +8162,382 @@ export class GameSim {
     }
   }
 
+  private resetPartner() {
+    this.partnerMode = { you: "handsOff", foe: "handsOff" };
+    this.partnerQueue = { you: [], foe: [] };
+    this.partnerFocus = { you: null, foe: null };
+    this.partnerSaving = { you: false, foe: false };
+    this.partnerSeq = 1;
+    this.lastPartnerFocus = undefined;
+  }
+
+  private claimHumanTroops(team: Team, ids: number[]) {
+    if (!this.isAssistedKeep(team)) return;
+    for (const id of ids) {
+      const unit = this.state.units.find((u) => u.id === id && u.team === team && u.fromBarracks && u.hp > 0);
+      if (unit) unit.humanOwned = true;
+    }
+  }
+
+  private syncPartnerFocus() {
+    if (this.observer || !this.isAssistedKeep(this.localTeam)) return;
+    let id: number | null = null;
+    for (const unitId of this.state.selectedUnitIds) {
+      const unit = this.state.units.find(
+        (u) => u.id === unitId && u.hp > 0 && u.fromBarracks && u.team === this.localTeam,
+      );
+      if (unit) {
+        id = unit.id;
+        break;
+      }
+    }
+    if (this.lastPartnerFocus === id) return;
+    this.lastPartnerFocus = id;
+    this.partnerFocus[this.localTeam] = id;
+    if (this.orderSink && !this.applyingRemote) {
+      this.orderSink({ t: "partnerFocus", team: this.localTeam, id });
+    }
+  }
+
+  /** Fresh barracks troops follow the partner mode. Pure CPU keeps the old layer rally. */
+  private rallyFreshTroops(team: Team) {
+    const mode = this.assistedPartnerMode(team);
+    if (mode === "handsOff") return;
+    if (mode === "reinforce") {
+      this.reinforceUnclaimed(team);
+      return;
+    }
+    const layer = this.state.defendLayer[team];
+    if (layer) this.assignDefendRallies(team, layer, true);
+  }
+
+  private clearUnclaimedOrders(team: Team) {
+    for (const unit of this.state.units) {
+      if (unit.team !== team || unit.hp <= 0 || !unit.fromBarracks || !this.cpuMayCommand(unit)) continue;
+      if (!unit.manualOrder && unit.guardUnitId == null) continue;
+      this.clearUnitMicroOrders(unit);
+      unit.manualOrder = false;
+      unit.rallyPoint = undefined;
+    }
+  }
+
+  /** Unclaimed troops sit on the defend layer the human already chose. */
+  holdUnclaimedLine(team: Team) {
+    if (this.assistedPartnerMode(team) !== "hold") return;
+    const layer = this.state.defendLayer[team];
+    if (!layer) return;
+    this.assignDefendRallies(team, layer, true, false);
+  }
+
+  private partnerAnchor(team: Team): Unit | null {
+    const drivenId = this.drivenUnitForTeam(team);
+    if (drivenId != null) {
+      const driven = this.state.units.find((u) => u.id === drivenId && u.hp > 0 && u.team === team);
+      if (driven) return driven;
+    }
+    const focus = this.partnerFocus[team];
+    if (focus == null) return null;
+    return (
+      this.state.units.find((u) => u.id === focus && u.hp > 0 && u.team === team && u.fromBarracks) ?? null
+    );
+  }
+
+  /** Unclaimed troops guard the fielded soldier, or the human's current selection. */
+  reinforceUnclaimed(team: Team) {
+    if (this.assistedPartnerMode(team) !== "reinforce") return;
+    const anchor = this.partnerAnchor(team);
+    const troops = this.state.units.filter(
+      (u) => u.team === team && u.hp > 0 && u.fromBarracks && this.cpuMayCommand(u) && u.id !== anchor?.id,
+    );
+    if (!anchor) {
+      for (const unit of troops) {
+        if (unit.guardUnitId == null) continue;
+        const guarded = this.state.units.find((u) => u.id === unit.guardUnitId && u.hp > 0);
+        if (guarded) continue;
+        this.clearUnitMicroOrders(unit);
+        unit.manualOrder = false;
+        unit.rallyPoint = undefined;
+      }
+      return;
+    }
+    const need = troops.filter((u) => u.guardUnitId !== anchor.id).map((u) => u.id);
+    if (need.length > 0) this.aiUnitGuard(team, need, anchor.id);
+  }
+
+  private applyPartnerMode(team: Team, mode: PartnerMode, effects: boolean) {
+    if (!this.isAssistedKeep(team) || !partnerModeUsable(mode)) return;
+    this.partnerMode[team] = mode;
+    if (!effects) return;
+    this.clearUnclaimedOrders(team);
+    if (mode === "hold") this.holdUnclaimedLine(team);
+    else if (mode === "reinforce") this.reinforceUnclaimed(team);
+  }
+
+  private applyPartnerPush(team: Team, call: PartnerCall) {
+    if (!this.isAssistedKeep(team) || !partnerCallUsable(call)) return false;
+    const queue = this.partnerQueue[team];
+    if (queue.some((item) => item.id === call.id)) return true;
+    if (queue.length >= PARTNER_QUEUE_CAP) return false;
+    queue.push({ id: call.id, kind: call.kind, unit: call.unit, site: call.site });
+    if (call.id >= this.partnerSeq) this.partnerSeq = call.id + 1;
+    return true;
+  }
+
+  private applyPartnerCancel(team: Team, id: number) {
+    if (!this.isAssistedKeep(team)) return;
+    this.partnerQueue[team] = this.partnerQueue[team].filter((call) => call.id !== id);
+  }
+
+  private applyPartnerRelease(team: Team, ids: number[], effects: boolean) {
+    if (!this.isAssistedKeep(team)) return false;
+    let any = false;
+    for (const id of ids) {
+      const unit = this.state.units.find((u) => u.id === id && u.team === team && u.fromBarracks);
+      if (!unit) continue;
+      any = true;
+      unit.humanOwned = false;
+      if (!effects) continue;
+      this.clearUnitMicroOrders(unit);
+      unit.manualOrder = false;
+      unit.rallyPoint = undefined;
+    }
+    if (!any || !effects) return any;
+    if (this.partnerMode[team] === "hold") this.holdUnclaimedLine(team);
+    else if (this.partnerMode[team] === "reinforce") this.reinforceUnclaimed(team);
+    return true;
+  }
+
+  private applyPartnerFocus(team: Team, id: number | null) {
+    if (!this.isAssistedKeep(team)) return;
+    this.partnerFocus[team] = id;
+  }
+
+  setPartnerMode(mode: PartnerMode) {
+    if (!this.isAssistedKeep(this.localTeam) || !partnerModeUsable(mode)) return;
+    if (this.redirect({ t: "partnerMode", team: this.localTeam, mode })) return;
+    this.applyPartnerMode(this.localTeam, mode, true);
+  }
+
+  pushPartnerCall(token: string) {
+    if (!this.isAssistedKeep(this.localTeam)) return false;
+    const spec = partnerTokenUsable(token);
+    if (!spec) return false;
+    if (this.partnerQueue[this.localTeam].length >= PARTNER_QUEUE_CAP) return false;
+    const id = this.partnerSeq++;
+    const call: PartnerCall =
+      spec.kind === "train" ? { id, kind: "train", unit: spec.unit } : { id, kind: "upgrade", site: spec.site };
+    if (
+      this.redirect({
+        t: "partnerPush",
+        team: this.localTeam,
+        id,
+        kind: call.kind,
+        unit: call.unit,
+        site: call.site,
+      })
+    ) {
+      return true;
+    }
+    return this.applyPartnerPush(this.localTeam, call);
+  }
+
+  cancelPartnerCall(id: number) {
+    if (!this.isAssistedKeep(this.localTeam)) return;
+    if (this.redirect({ t: "partnerCancel", team: this.localTeam, id })) return;
+    this.applyPartnerCancel(this.localTeam, id);
+  }
+
+  releaseSelectedToCpu() {
+    if (!this.isAssistedKeep(this.localTeam)) return false;
+    const ids = this.selectedSquad(this.localTeam, this.state.selectedUnitIds).map((u) => u.id);
+    if (ids.length === 0) return false;
+    if (this.redirect({ t: "partnerRelease", team: this.localTeam, ids })) return true;
+    return this.applyPartnerRelease(this.localTeam, ids, true);
+  }
+
+  /** Spend the team's stock on the human's list before the discretionary build. */
+  advancePartnerQueue(team: Team) {
+    this.partnerSaving[team] = false;
+    if (!this.isAssistedKeep(team)) return;
+    const queue = this.partnerQueue[team];
+    let guard = 0;
+    while (queue.length > 0 && guard < PARTNER_QUEUE_CAP + 1) {
+      guard += 1;
+      const outcome = this.pursuePartnerCall(team, queue[0]!);
+      if (outcome === "done") {
+        queue.shift();
+        continue;
+      }
+      if (outcome === "saving") this.partnerSaving[team] = true;
+      return;
+    }
+  }
+
+  private keepReady(team: Team): "ready" | "saving" | "wait" {
+    if (this.state.keeps[team].upgraded) return "ready";
+    const cost: ResCost = { gold: KEEP_UPGRADE_GOLD, wood: KEEP_UPGRADE_WOOD };
+    if (!this.canAfford(team, cost)) return "saving";
+    return this.upgradeKeep(team) ? "ready" : "wait";
+  }
+
+  private purpleHouse(team: Team) {
+    return this.state.buildings.find(
+      (b) => b.team === team && b.hp > 0 && b.kind === "house" && this.isMidEcoPad(b.padId),
+    );
+  }
+
+  private livingChurch(team: Team, cathedralOnly = false) {
+    return this.state.buildings.find(
+      (b) => b.team === team && b.hp > 0 && b.kind === "church" && (!cathedralOnly || b.cathedral === true),
+    );
+  }
+
+  private ensureChurch(team: Team): "ready" | "saving" | "wait" {
+    if (this.livingChurch(team)) return "ready";
+    let house = this.purpleHouse(team);
+    if (!house) {
+      const cost = BUILD_COST.house;
+      if (!this.canAfford(team, cost)) return "saving";
+      if (!this.placeAiBuilding("house", 0, team, "midEco")) return "wait";
+      house = this.purpleHouse(team);
+      if (!house) return "wait";
+    }
+    if (this.state.gold[team] < CHURCH_UPGRADE_GOLD) return "saving";
+    const before = this.state.gold[team];
+    this.consecrateHouse(team, house.id);
+    return this.livingChurch(team) || this.state.gold[team] < before ? "ready" : "wait";
+  }
+
+  private ensureCathedral(team: Team): "ready" | "saving" | "wait" {
+    if (this.livingChurch(team, true)) return "ready";
+    const keep = this.keepReady(team);
+    if (keep !== "ready") return keep;
+    const church = this.ensureChurch(team);
+    if (church !== "ready") return church;
+    const site = this.livingChurch(team);
+    if (!site) return "wait";
+    if (site.cathedral) return "ready";
+    const cost: ResCost = { gold: CATHEDRAL_UPGRADE_GOLD, wood: CATHEDRAL_UPGRADE_WOOD };
+    if (!this.canAfford(team, cost)) return "saving";
+    return this.raiseCathedral(team, site.id) ? "ready" : "wait";
+  }
+
+  private pursueMarket(team: Team): "done" | "saving" | "wait" {
+    if (this.state.buildings.some((b) => b.team === team && b.hp > 0 && b.kind === "market")) return "done";
+    let house = this.purpleHouse(team);
+    if (!house) {
+      const cost = BUILD_COST.house;
+      if (!this.canAfford(team, cost)) return "saving";
+      if (!this.placeAiBuilding("house", 0, team, "midEco")) return "wait";
+      house = this.purpleHouse(team);
+      if (!house) return "wait";
+    }
+    const cost: ResCost = { gold: MARKET_UPGRADE_GOLD, wood: MARKET_UPGRADE_WOOD };
+    if (!this.canAfford(team, cost)) return "saving";
+    return this.raiseMarket(team, house.id) ? "done" : "wait";
+  }
+
+  private queuePartnerBarracks(team: Team, kind: TrainKind): "done" | "saving" | "wait" {
+    const def = UNIT_DEFS[kind];
+    const cost: ResCost = { gold: def.cost ?? 0, wood: def.woodCost ?? 0 };
+    let halls = this.state.buildings.filter((b) => b.team === team && b.kind === "barracks" && b.hp > 0);
+    if (halls.length === 0) {
+      const build = BUILD_COST.barracks;
+      if (!this.canAfford(team, build)) return "saving";
+      if (!this.placeAiBuilding("barracks", 0, team)) return "wait";
+      halls = this.state.buildings.filter((b) => b.team === team && b.kind === "barracks" && b.hp > 0);
+      if (halls.length === 0) return "wait";
+    }
+    if (!this.canAfford(team, cost)) return "saving";
+    if (this.armySlotsUsed(team) >= this.armyCap(team)) return "wait";
+    const hall = [...halls].sort((a, b) => a.queue.length - b.queue.length)[0];
+    if (!hall || hall.queue.length >= MAX_TRAIN_QUEUE) return "wait";
+    return this.enqueueTrainAt(team, kind, hall.id) ? "done" : "wait";
+  }
+
+  private queuePartnerKeep(team: Team, kind: "raider" | "brute"): "done" | "saving" | "wait" {
+    const ready = this.keepReady(team);
+    if (ready !== "ready") return ready;
+    const def = UNIT_DEFS[kind];
+    const cost: ResCost = { gold: def.cost ?? 0, wood: def.woodCost ?? 0 };
+    if (!this.canAfford(team, cost)) return "saving";
+    if (this.state.keeps[team].troopQueue.length >= MAX_TRAIN_QUEUE) return "wait";
+    if (this.armySlotsUsed(team) >= this.armyCap(team)) return "wait";
+    return this.enqueueKeepTrainAt(team, kind) ? "done" : "wait";
+  }
+
+  private queuePartnerTemplar(team: Team): "done" | "saving" | "wait" {
+    const ready = this.ensureCathedral(team);
+    if (ready !== "ready") return ready;
+    const def = UNIT_DEFS.templar;
+    const cost: ResCost = { gold: def.cost ?? 0, wood: def.woodCost ?? 0 };
+    if (!this.canAfford(team, cost)) return "saving";
+    if (this.armySlotsUsed(team) >= this.armyCap(team)) return "wait";
+    const halls = this.state.buildings.filter((b) => b.team === team && b.hp > 0 && b.kind === "church" && b.cathedral);
+    const hall = [...halls].sort((a, b) => (a.templarQueue?.length ?? 0) - (b.templarQueue?.length ?? 0))[0];
+    if (!hall || (hall.templarQueue?.length ?? 0) >= MAX_TRAIN_QUEUE) return "wait";
+    return this.enqueueTemplarAt(team, hall.id) ? "done" : "wait";
+  }
+
+  private pursuePartnerCall(team: Team, call: PartnerCall): "done" | "saving" | "wait" {
+    if (call.kind === "upgrade") {
+      if (call.site === "keep") {
+        const ready = this.keepReady(team);
+        return ready === "ready" ? "done" : ready;
+      }
+      if (call.site === "market") return this.pursueMarket(team);
+      if (call.site === "church") {
+        const ready = this.ensureChurch(team);
+        return ready === "ready" ? "done" : ready;
+      }
+      if (call.site === "cathedral") {
+        const ready = this.ensureCathedral(team);
+        return ready === "ready" ? "done" : ready;
+      }
+      return "done";
+    }
+    const unit = call.unit;
+    if (!unit) return "done";
+    if (unit === "raider" || unit === "brute") return this.queuePartnerKeep(team, unit);
+    if (unit === "templar") return this.queuePartnerTemplar(team);
+    return this.queuePartnerBarracks(team, unit);
+  }
+
+  private readPartnerSnap(raw: MatchSnapshot["partner"]) {
+    if (!raw) return;
+    for (const team of ["you", "foe"] as const) {
+      const side = raw[team];
+      if (!side || !partnerModeUsable(side.mode) || !Array.isArray(side.queue)) continue;
+      this.partnerMode[team] = side.mode;
+      const queue: PartnerCall[] = [];
+      for (const item of side.queue) {
+        if (!partnerCallUsable(item)) continue;
+        queue.push({ id: item.id, kind: item.kind, unit: item.unit, site: item.site });
+        if (item.id >= this.partnerSeq) this.partnerSeq = item.id + 1;
+        if (queue.length >= PARTNER_QUEUE_CAP) break;
+      }
+      this.partnerQueue[team] = queue;
+    }
+  }
+
+  private partnerUi(view: Team): UiSnapshot["partner"] {
+    if (this.observer || view !== this.localTeam || !this.isAssistedKeep(view)) return null;
+    const queue = this.partnerQueue[view];
+    return {
+      mode: this.partnerMode[view],
+      active: queue[0] ? partnerCallLabel(queue[0]) : null,
+      queue: queue.map((call) => ({ id: call.id, label: partnerCallLabel(call) })),
+      modes: PARTNER_MODE_CHOICES,
+      calls: partnerChoices().map((choice) => ({
+        token: choice.token,
+        label: choice.label,
+        price: choice.price,
+        enabled: queue.length < PARTNER_QUEUE_CAP,
+      })),
+      canRelease: this.selectedSquad(view, this.state.selectedUnitIds).length > 0,
+    };
+  }
+
   aiEnqueueTrain(kind: TrainKind, team: Team = "foe") {
     const train = this.campaignMission?.unit ?? kind;
     const def = UNIT_DEFS[train];
@@ -8264,6 +8723,24 @@ export class GameSim {
         case "unitRelease":
           this.applyUnitRelease(team, order.ids);
           break;
+        case "partnerMode":
+          this.applyPartnerMode(team, order.mode, true);
+          break;
+        case "partnerPush":
+          this.applyPartnerPush(team, { id: order.id, kind: order.kind, unit: order.unit, site: order.site });
+          break;
+        case "partnerCancel":
+          this.applyPartnerCancel(team, order.id);
+          break;
+        case "partnerRelease":
+          this.applyPartnerRelease(team, order.ids, true);
+          break;
+        case "partnerClaim":
+          this.claimHumanTroops(team, order.ids);
+          break;
+        case "partnerFocus":
+          this.applyPartnerFocus(team, order.id);
+          break;
         case "barricade":
           this.tryPlaceBarricade({ x: order.x, y: order.y }, team, order.builderId);
           break;
@@ -8321,6 +8798,7 @@ export class GameSim {
           const body = this.state.units.find((u) => u.id === order.id);
           if (!body || !this.canPossess(body, team)) break;
           this.claimRemoteBody(playerId, body, team);
+          this.claimHumanTroops(team, [body.id]);
           const drive = this.remoteDrivers.get(playerId);
           if (!drive) break;
           drive.body = body.id;
@@ -8346,6 +8824,7 @@ export class GameSim {
           const body = this.state.units.find((u) => u.id === order.id);
           if (!body || !this.canPossess(body, team)) break;
           this.claimRemoteBody(playerId, body, team);
+          this.claimHumanTroops(team, [body.id]);
           const drive = this.remoteDrivers.get(playerId);
           if (!drive) break;
           drive.body = body.id;
@@ -8553,6 +9032,12 @@ export class GameSim {
             sides: { you: this.company.sides.you, foe: this.company.sides.foe },
           }
         : undefined,
+      partner: this.company
+        ? {
+            you: { mode: this.partnerMode.you, queue: this.partnerQueue.you.map((call) => ({ ...call })) },
+            foe: { mode: this.partnerMode.foe, queue: this.partnerQueue.foe.map((call) => ({ ...call })) },
+          }
+        : undefined,
       finalDuel: s.finalDuel
         ? {
             phase: s.finalDuel.phase,
@@ -8665,6 +9150,7 @@ export class GameSim {
         sides: { you: snap.company.sides.you, foe: snap.company.sides.foe },
       };
     }
+    if (snap.partner) this.readPartnerSnap(snap.partner);
     this.pendingTrain.clear();
     const s = this.state;
     const mapChanged = snap.mapId !== s.mapId;
@@ -9494,6 +9980,7 @@ export class GameSim {
       freshUnlock: this.lastUnlock,
       freshHold: this.freshHold,
       fieldSite: this.observer ? null : this.fieldSiteUi(view),
+      partner: this.partnerUi(view),
       marketQuotes: { ...s.market[view] },
       selectedCanRaiseMarket:
         !!selected &&
