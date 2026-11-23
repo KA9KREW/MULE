@@ -22,6 +22,13 @@ import {
   CHURCH_LEVY_INTERVAL,
   CHURCH_TEMPLAR_INTERVAL,
   CHURCH_UPGRADE_GOLD,
+  commanderDamageDealt,
+  commanderDamageTaken,
+  freshMarketBook,
+  MARKET_LOT,
+  MARKET_UPGRADE_GOLD,
+  MARKET_UPGRADE_WOOD,
+  shiftMarketBook,
   KEEP_UPGRADE_GOLD,
   KEEP_UPGRADE_WOOD,
   isWardKind,
@@ -171,6 +178,7 @@ import type {
   Building,
   BuildingKind,
   DefendLayerId,
+  FieldSiteUi,
   GameState,
   KeepTrainKind,
   Lane,
@@ -292,6 +300,8 @@ export class GameSim {
     string,
     { body: number | null; keys: { w: boolean; a: boolean; s: boolean; d: boolean }; yaw: number; strike: boolean }
   >();
+  /** Last living body each player took the field in. Rally uses this after they step out. */
+  private lastDriven = new Map<string, number>();
   /** Fractional wood/gold accumulator for smooth AoE2-style repair resource trickle. */
   private repairCostAcc: Record<Team, { gold: number; wood: number }> = {
     you: { gold: 0, wood: 0 },
@@ -308,6 +318,7 @@ export class GameSim {
 
   private makeFreshState(map: MapDef): GameState {
     this.pendingTrain.clear();
+    this.lastDriven.clear();
     this.repairCostAcc = { you: { gold: 0, wood: 0 }, foe: { gold: 0, wood: 0 } };
     this.repairPulseHp.clear();
     const meta = loadMeta();
@@ -417,6 +428,7 @@ export class GameSim {
         },
       },
       gold: { you: stash.gold, foe: stash.gold },
+      market: { you: freshMarketBook(), foe: freshMarketBook() },
       wood: { you: stash.wood, foe: stash.wood },
       units: [],
       buildings,
@@ -1432,6 +1444,7 @@ export class GameSim {
     const u = s.units.find((x) => x.id === id);
     if (!u || !this.canPossess(u, this.localTeam)) return false;
     if (this.redirect({ t: "possess", team: this.localTeam, id: u.id })) {
+      this.rememberDriven(this.localPlayerId, u.id);
       s.possessedId = u.id;
       s.speed = 1;
       s.possessCharge = 0;
@@ -1445,6 +1458,7 @@ export class GameSim {
       this.addToast(`Taking the field — ${UNIT_DEFS[u.kind].label}. Esc returns.`);
       return true;
     }
+    this.rememberDriven(this.localPlayerId, u.id);
     s.possessedId = u.id;
     s.speed = 1;
     s.possessCharge = 0;
@@ -1584,7 +1598,7 @@ export class GameSim {
     const keepAim = aim(keep.pos);
     const keepReach = ranged ? ARCHER_RANGE : 34;
     if (keepAim.ok && keepAim.d <= keepReach) {
-      const dmg = u.damage * u.keepMult * POSSESS_DAMAGE_MULT;
+      const dmg = this.outgoing(u, u.damage * u.keepMult * POSSESS_DAMAGE_MULT);
       keep.hp -= dmg;
       keep.hitFlash = 0.2;
       this.emitCombat(u.kind === "rammer" ? "ramImpact" : ranged ? "arrow" : "keepImpact", u.pos, keep.pos, team);
@@ -1610,7 +1624,7 @@ export class GameSim {
         this.addFloat("CRUSH", wall.b.pos.x, wall.b.pos.y - 9, "#e4bd77");
         this.notePossessVision(1);
       } else {
-        const chip = Math.round(barricadeStrike(u.kind) * POSSESS_DAMAGE_MULT);
+        const chip = Math.round(this.outgoing(u, barricadeStrike(u.kind) * POSSESS_DAMAGE_MULT));
         wall.b.hp -= chip;
         this.emitCombat(wall.b.hp > 0 ? "woodHit" : "woodBreak", u.pos, wall.b.pos, team);
         this.addFloat(wall.b.hp > 0 ? `-${chip}` : "BREACH", wall.b.pos.x, wall.b.pos.y - 9, "#e4bd77");
@@ -2303,6 +2317,30 @@ export class GameSim {
     return true;
   }
 
+  private rememberDriven(playerId: string, unitId: number) {
+    this.lastDriven.set(playerId, unitId);
+  }
+
+  /** Current fielded body, or the last one if that player has stepped out and it still lives. */
+  private commanderTargetId(playerId: string): number | null {
+    const liveId =
+      playerId === this.localPlayerId ? this.state.possessedId : (this.remoteDrivers.get(playerId)?.body ?? null);
+    const live = liveId != null ? this.state.units.find((u) => u.id === liveId && u.hp > 0) : undefined;
+    if (live) return live.id;
+    const last = this.lastDriven.get(playerId);
+    if (last == null) return null;
+    const body = this.state.units.find((u) => u.id === last && u.hp > 0);
+    return body ? body.id : null;
+  }
+
+  private attachCommanderRally(u: Unit, source?: { commanderRally?: boolean; commanderRallyPlayer?: string }) {
+    if (!source?.commanderRally || !source.commanderRallyPlayer) return;
+    if (!u.fromBarracks) return;
+    const guardId = this.commanderTargetId(source.commanderRallyPlayer);
+    if (guardId == null || guardId === u.id) return;
+    this.applyUnitGuard(u.team, [u.id], guardId, true);
+  }
+
   private applyUnitAttackUnit(team: Team, ids: number[], targetId: number, silent = false): boolean {
     const target = this.state.units.find((u) => u.id === targetId && u.team !== team && u.hp > 0);
     if (!target) return false;
@@ -2893,7 +2931,7 @@ export class GameSim {
       b.churchTemplarTimer -= dt;
       if (b.churchLevyTimer <= 0) {
         if (this.armySlotsUsed(b.team) < this.armyCap(b.team)) {
-          this.spawnUnit(b.team, "soldier", this.pickLane(b.team), true);
+          this.spawnUnit(b.team, "soldier", this.pickLane(b.team), true, undefined, undefined, b);
           const layer = this.state.defendLayer[b.team];
           if (layer) this.assignDefendRallies(b.team, layer, true);
           b.churchLevyTimer = CHURCH_LEVY_INTERVAL;
@@ -2903,7 +2941,7 @@ export class GameSim {
       }
       if (b.churchTemplarTimer <= 0) {
         if (this.armySlotsUsed(b.team) < this.armyCap(b.team)) {
-          this.spawnUnit(b.team, "templar", this.pickLane(b.team), true);
+          this.spawnUnit(b.team, "templar", this.pickLane(b.team), true, undefined, undefined, b);
           const layer = this.state.defendLayer[b.team];
           if (layer) this.assignDefendRallies(b.team, layer, true);
           b.churchTemplarTimer = CHURCH_TEMPLAR_INTERVAL;
@@ -3073,7 +3111,7 @@ export class GameSim {
       const job = keep.troopQueue[0]!;
       job.timeLeft -= dt;
       if (job.timeLeft > 0) continue;
-      this.spawnUnit(team, job.kind, this.pickLane(team), true);
+      this.spawnUnit(team, job.kind, this.pickLane(team), true, undefined, undefined, keep);
       keep.troopQueue.shift();
       const layer = this.state.defendLayer[team];
       if (layer) this.assignDefendRallies(team, layer, true);
@@ -3089,7 +3127,7 @@ export class GameSim {
       const job = queue[0]!;
       job.timeLeft -= dt;
       if (job.timeLeft > 0) continue;
-      this.spawnUnit(b.team, "templar", this.pickLane(b.team), true, b);
+      this.spawnUnit(b.team, "templar", this.pickLane(b.team), true, b, undefined, b);
       queue.shift();
       const layer = this.state.defendLayer[b.team];
       if (layer) this.assignDefendRallies(b.team, layer, true);
@@ -3139,6 +3177,7 @@ export class GameSim {
     fromBarracks: boolean,
     barracks?: Building,
     waveOpts?: { batchId?: number; spawnPos?: Vec2; waveNumber?: number },
+    rallyFrom?: { commanderRally?: boolean; commanderRallyPlayer?: string },
   ) {
     const def = UNIT_DEFS[kind];
     // Wave scalar first, then endless wave scaling (waves 13+) or barracks upgrades on top.
@@ -3213,7 +3252,10 @@ export class GameSim {
       waveBatchId: !fromBarracks ? waveOpts?.batchId : undefined,
     };
     this.state.units.push(u);
-    if (fromBarracks && holdLayer && holdLayer !== "assault") {
+    this.attachCommanderRally(u, rallyFrom ?? barracks);
+    if (u.manualOrder) {
+      // Rally-to-player already set a guard slot. Leave the barracks formation alone.
+    } else if (fromBarracks && holdLayer && holdLayer !== "assault") {
       // Slot newly spawned troops smoothly into the team's active holding formation.
       this.assignDefendRallies(team, holdLayer, true);
     } else if (fromBarracks && !holdLayer && barracks?.rallyPoint && u.rallyPoint) {
@@ -3975,6 +4017,10 @@ export class GameSim {
 
   private buildFor(team: Team, kind: BuildingKind, padId: string) {
     const s = this.state;
+    if (kind === "market" || kind === "church") {
+      this.tell(team, "Raise that from a purple house.");
+      return;
+    }
     const pad = s.pads.find((p) => p.id === padId);
     if (!pad) return;
     if (pad.team !== team) {
@@ -4042,7 +4088,7 @@ export class GameSim {
   private upgradeBuilding(team: Team, buildingId: number, kind: "damage" | "rate") {
     const s = this.state;
     const b = s.buildings.find((x) => x.id === buildingId && x.team === team);
-    if (!b || b.kind === "house" || b.kind === "church") return;
+    if (!b || b.kind === "house" || b.kind === "church" || b.kind === "market") return;
     const rank = kind === "damage" ? b.damageRank : b.rateRank;
     if (rank >= 2) return;
     const cost = UPGRADE_COST[rank];
@@ -4122,6 +4168,161 @@ export class GameSim {
       this.humanLog.buildOrder.push({ t: Math.round(s.time), kind: "church", zone: "midEco" });
     }
     this.tell(team, "Church consecrated — free soldiers, templars, blessing aura.");
+  }
+
+  /** Place on the pad the fielded soldier is standing on. Same cost and pad rules as the build bar. */
+  buildOnPad(kind: BuildingKind, padId: string) {
+    if (this.orderSink && !this.applyingRemote) {
+      this.orderSink({ t: "build", team: this.localTeam, kind, padId });
+      this.pendingOwnPad = padId;
+      return;
+    }
+    this.buildFor(this.localTeam, kind, padId);
+  }
+
+  /**
+   * Queue at the barracks under the fielded soldier.
+   * Several selected barracks keep the shortest-queue split.
+   */
+  fieldEnqueueTrain(kind: TrainKind, buildingId: number) {
+    if (this.livingSelectedBarracks().length > 1) return this.enqueueTrain(kind, this.localTeam);
+    if (this.orderSink && !this.applyingRemote) {
+      this.orderSink({ t: "train", team: this.localTeam, kind, buildingId });
+      this.notePendingTrain(buildingId);
+      return true;
+    }
+    return this.enqueueTrainAt(this.localTeam, kind, buildingId);
+  }
+
+  fieldEnqueueTemplar(buildingId: number) {
+    if (this.redirect({ t: "templar", team: this.localTeam, buildingId })) return true;
+    return this.enqueueTemplarAt(this.localTeam, buildingId);
+  }
+
+  fieldConsecrate(buildingId: number) {
+    if (this.redirect({ t: "church", team: this.localTeam, buildingId })) return true;
+    this.consecrateHouse(this.localTeam, buildingId);
+  }
+
+  raiseSelectedMarket() {
+    const id = this.state.selectedBuildingId;
+    if (id == null) return false;
+    return this.fieldRaiseMarket(id);
+  }
+
+  fieldRaiseMarket(buildingId: number) {
+    if (this.redirect({ t: "market", team: this.localTeam, buildingId })) return true;
+    return this.raiseMarket(this.localTeam, buildingId);
+  }
+
+  private raiseMarket(team: Team, buildingId: number) {
+    const s = this.state;
+    const b = s.buildings.find((x) => x.id === buildingId && x.team === team && x.kind === "house");
+    if (!b || !this.isMidEcoPad(b.padId)) {
+      this.tell(team, "Select a purple midfield house to raise a market.");
+      return false;
+    }
+    const cost: ResCost = { gold: MARKET_UPGRADE_GOLD, wood: MARKET_UPGRADE_WOOD };
+    if (!this.canAfford(team, cost)) {
+      this.tell(team, `Need ${cost.gold}g ${cost.wood}w to raise a market.`);
+      return false;
+    }
+    this.spendRes(team, cost);
+    b.spent += cost.gold;
+    b.spentWood += cost.wood;
+    b.kind = "market";
+    b.maxHp = BUILD_HP.market;
+    b.hp = b.maxHp;
+    b.queue = [];
+    b.cathedral = false;
+    b.templarQueue = undefined;
+    b.churchLevyTimer = undefined;
+    b.churchTemplarTimer = undefined;
+    b.commanderRally = undefined;
+    b.commanderRallyPlayer = undefined;
+    if (team === "you" && this.humanLog.active) {
+      this.humanLog.buildOrder.push({ t: Math.round(s.time), kind: "market", zone: "midEco" });
+    }
+    this.tell(team, "Market raised.");
+    return true;
+  }
+
+  trade(resource: "wood" | "gold", side: "buy" | "sell") {
+    if (this.redirect({ t: "trade", team: this.localTeam, resource, side })) return true;
+    return this.applyTrade(this.localTeam, resource, side);
+  }
+
+  private applyTrade(team: Team, resource: "wood" | "gold", side: "buy" | "sell") {
+    const living = this.state.buildings.some((b) => b.team === team && b.kind === "market" && b.hp > 0);
+    if (!living) {
+      this.tell(team, "Raise a market first.");
+      return false;
+    }
+    const book = this.state.market[team];
+    const s = this.state;
+    if (resource === "wood" && side === "buy") {
+      if (s.gold[team] < book.woodBuy) {
+        this.tell(team, `Need ${book.woodBuy} gold.`);
+        return false;
+      }
+      s.gold[team] -= book.woodBuy;
+      s.wood[team] += MARKET_LOT;
+    } else if (resource === "wood" && side === "sell") {
+      if (s.wood[team] < MARKET_LOT) {
+        this.tell(team, `Need ${MARKET_LOT} wood.`);
+        return false;
+      }
+      s.wood[team] -= MARKET_LOT;
+      s.gold[team] += book.woodSell;
+    } else if (resource === "gold" && side === "buy") {
+      if (s.wood[team] < book.goldBuy) {
+        this.tell(team, `Need ${book.goldBuy} wood.`);
+        return false;
+      }
+      s.wood[team] -= book.goldBuy;
+      s.gold[team] += MARKET_LOT;
+    } else {
+      if (s.gold[team] < MARKET_LOT) {
+        this.tell(team, `Need ${MARKET_LOT} gold.`);
+        return false;
+      }
+      s.gold[team] -= MARKET_LOT;
+      s.wood[team] += book.goldSell;
+    }
+    s.market[team] = shiftMarketBook(book, resource, side);
+    return true;
+  }
+
+  setFieldRally(on: boolean, target: { buildingId?: number; keep?: boolean }) {
+    if (!this.applyingRemote && this.orderSink) {
+      this.orderSink({
+        t: "commanderRally",
+        team: this.localTeam,
+        on,
+        buildingId: target.keep ? undefined : target.buildingId,
+        keep: target.keep === true,
+      });
+    }
+    if (this.applyingRemote) return;
+    this.applyFieldRally(this.localTeam, this.localPlayerId, on, target);
+  }
+
+  private applyFieldRally(
+    team: Team,
+    playerId: string,
+    on: boolean,
+    target: { buildingId?: number; keep?: boolean },
+  ) {
+    if (target.keep) {
+      const keep = this.state.keeps[team];
+      keep.commanderRally = on;
+      keep.commanderRallyPlayer = on ? playerId : undefined;
+      return;
+    }
+    const b = this.state.buildings.find((x) => x.id === target.buildingId && x.team === team && x.hp > 0);
+    if (!b || (b.kind !== "barracks" && b.kind !== "church")) return;
+    b.commanderRally = on;
+    b.commanderRallyPlayer = on ? playerId : undefined;
   }
 
   /** Pay 1000 gold and 1000 wood to unlock raiders, brutes, and cathedral upgrades. */
@@ -4369,7 +4570,7 @@ export class GameSim {
   }
 
   private trebuchetHitBuilding(u: Unit, b: Building) {
-    const dmg = trebuchetShot(b.maxHp);
+    const dmg = this.outgoing(u, trebuchetShot(b.maxHp));
     b.hp -= dmg;
     this.emitCombat("trebuchet", u.pos, b.pos, u.team);
     this.addFloat(`-${dmg}`, b.pos.x, b.pos.y - 8, "#e8d39a");
@@ -4378,7 +4579,7 @@ export class GameSim {
   }
 
   private trebuchetHitBarricade(u: Unit, wall: Barricade) {
-    const dmg = trebuchetShot(wall.maxHp);
+    const dmg = this.outgoing(u, trebuchetShot(wall.maxHp));
     wall.hp -= dmg;
     this.emitCombat("trebuchet", u.pos, wall.pos, u.team);
     this.addFloat(wall.hp > 0 ? `-${dmg}` : "BREACH", wall.pos.x, wall.pos.y - 9, "#e4bd77");
@@ -4392,7 +4593,7 @@ export class GameSim {
   }
 
   private trebuchetHitUnit(u: Unit, target: Unit) {
-    const dmg = trebuchetShot(target.maxHp);
+    const dmg = this.incoming(target, this.outgoing(u, trebuchetShot(target.maxHp)), false);
     target.hp -= dmg;
     this.emitCombat("trebuchet", u.pos, target.pos, u.team);
     this.addFloat(`-${dmg}`, target.pos.x, target.pos.y - 8, "#e8d39a");
@@ -4401,7 +4602,7 @@ export class GameSim {
 
   private trebuchetHitKeep(u: Unit, keep: GameState["keeps"][Team]) {
     const waveMult = !u.fromBarracks && !this.campaignMission ? waveStrengthScalar(Math.max(1, this.state.waveIndex)) : 1;
-    const dmg = Math.max(12, Math.round(14 * waveMult));
+    const dmg = this.outgoing(u, Math.max(12, Math.round(14 * waveMult)));
     keep.hp -= dmg;
     keep.hitFlash = 0.2;
     this.emitCombat("trebuchet", u.pos, keep.pos, u.team);
@@ -4904,7 +5105,7 @@ export class GameSim {
 
   private spySapKeep(u: Unit) {
     const keep = this.teamKeep(this.enemy(u.team));
-    const dmg = spyKeepDamage();
+    const dmg = this.outgoing(u, spyKeepDamage());
     keep.hp -= dmg;
     keep.hitFlash = 0.22;
     u.attackTimer = u.attackCooldown + u.siegeGap;
@@ -4953,10 +5154,11 @@ export class GameSim {
             if (target.kind === "trebuchet") {
               if (u.attackTimer <= 0) this.spyWreckTrebuchet(u, target);
             } else if (u.attackTimer <= 0) {
-              target.hp -= 10;
+              const dealt = this.incoming(target, this.outgoing(u, 10), false);
+              target.hp -= dealt;
               u.attackTimer = u.attackCooldown;
               this.emitCombat("meleeHit", u.pos, target.pos, team);
-              this.addFloat("-10", target.pos.x, target.pos.y - 7, "#e8c8ff");
+              this.addFloat(`-${Math.round(dealt)}`, target.pos.x, target.pos.y - 7, "#e8c8ff");
             }
           } else {
             moveTowards(u.pos, this.spyGoalAroundDogs(u, target.pos), u.speed, dt);
@@ -5175,8 +5377,11 @@ export class GameSim {
     return BUILD_RANGE[b.kind];
   }
 
-  private applyTowerDamage(u: Unit, raw: number, kind: BuildingKind) {
-    const dmg = raw * towerDamageFactor(kind, u.towerResist, u.kind);
+  private applyTowerDamage(u: Unit, raw: number, kind: BuildingKind, source: "tower" | "keep" = "tower") {
+    let dmg = raw * towerDamageFactor(kind, u.towerResist, u.kind);
+    const defensiveBuilding =
+      source === "tower" && (kind === "watchtower" || kind === "ballista" || kind === "catapult");
+    dmg = this.incoming(u, dmg, defensiveBuilding);
     u.hp -= dmg;
     return dmg;
   }
@@ -5204,7 +5409,7 @@ export class GameSim {
     // The base arrow plus additional fire from each peon makes a populated keep
     // meaningfully safer without replacing dedicated towers.
     const raw = 4 + occupants * 2.5;
-    const dealt = this.applyTowerDamage(target, raw, "watchtower");
+    const dealt = this.applyTowerDamage(target, raw, "watchtower", "keep");
     this.addFloat(`-${Math.round(dealt)}`, target.pos.x, target.pos.y - 8, "#f6dfa0");
     keep.attackTarget = { ...target.pos };
     keep.attackFlash = 0.18;
@@ -5216,7 +5421,7 @@ export class GameSim {
     const enemyTeam = this.enemy(team);
     const keep = this.teamKeep(team);
     const towers = this.state.buildings.filter(
-      (b) => b.team === team && b.kind !== "barracks" && b.kind !== "house",
+      (b) => b.team === team && b.kind !== "barracks" && b.kind !== "house" && b.kind !== "market",
     );
     for (const t of towers) {
       t.attackTimer -= dt;
@@ -5382,10 +5587,11 @@ export class GameSim {
     const threat = this.nearestPeonThreat(team, v.pos, PEON_MELEE_RANGE);
     if (!threat) return false;
     if (v.attackTimer <= 0) {
-      threat.hp -= v.damage;
+      const dealt = this.incoming(threat, v.damage, false);
+      threat.hp -= dealt;
       v.attackTimer = PEON_ATTACK_CD;
       this.emitCombat("meleeHit", v.pos, threat.pos, team);
-      this.addFloat(`-${this.strikeText(v.damage)}`, threat.pos.x, threat.pos.y - 7, "#e8c070");
+      this.addFloat(`-${this.strikeText(dealt)}`, threat.pos.x, threat.pos.y - 7, "#e8c070");
     }
     return true;
   }
@@ -5427,10 +5633,11 @@ export class GameSim {
       if (dist(v.pos, target.pos) > PEON_MELEE_RANGE) {
         moveTowards(v.pos, target.pos, PEON_FIGHT_SPEED, dt);
       } else if (v.attackTimer <= 0) {
-        target.hp -= v.damage;
+        const dealt = this.incoming(target, v.damage, false);
+        target.hp -= dealt;
         v.attackTimer = PEON_ATTACK_CD;
         this.emitCombat("meleeHit", v.pos, target.pos, team);
-        this.addFloat(`-${this.strikeText(v.damage)}`, target.pos.x, target.pos.y - 8, "#c8e090");
+        this.addFloat(`-${this.strikeText(dealt)}`, target.pos.x, target.pos.y - 8, "#c8e090");
       }
       return;
     }
@@ -5461,10 +5668,11 @@ export class GameSim {
     if (dist(v.pos, target.pos) > PEON_MELEE_RANGE) {
       moveTowards(v.pos, target.pos, PEON_FIGHT_SPEED, dt);
     } else if (v.attackTimer <= 0) {
-      target.hp -= v.damage;
+      const dealt = this.incoming(target, v.damage, false);
+      target.hp -= dealt;
       v.attackTimer = PEON_ATTACK_CD;
       this.emitCombat("meleeHit", v.pos, target.pos, team);
-      this.addFloat(`-${this.strikeText(v.damage)}`, target.pos.x, target.pos.y - 8, "#c8e090");
+      this.addFloat(`-${this.strikeText(dealt)}`, target.pos.x, target.pos.y - 8, "#c8e090");
     }
     return true;
   }
@@ -5557,7 +5765,7 @@ export class GameSim {
       attacker.chargeReady = false;
     }
     if (this.inChurchAura(attacker)) dealt *= CHURCH_AURA_DAMAGE;
-    return dealt;
+    return this.incoming(target, this.outgoing(attacker, dealt), false);
   }
 
   /** Archer shots glance off wards. Melee keeps the levy bonus and the runner's charge. */
@@ -5567,7 +5775,25 @@ export class GameSim {
     if ("kind" in target && isWardKind(target.kind)) dealt *= ARCHER_VS_WARD;
     if ("kind" in target && target.kind === "trebuchet") dealt *= ARCHER_VS_TREBUCHET;
     if (this.inChurchAura(attacker)) dealt *= CHURCH_AURA_DAMAGE;
-    return dealt;
+    return this.incoming(target, this.outgoing(attacker, dealt), true);
+  }
+
+  /** +20% damage while guard-following a soldier a player is currently driving. */
+  private commanderBuffed(u: Unit) {
+    if (u.hp <= 0 || u.guardUnitId == null || u.guardUnitId === u.id) return false;
+    const lead = this.state.units.find((x) => x.id === u.guardUnitId && x.team === u.team && x.hp > 0);
+    if (!lead || lead.id === u.id) return false;
+    return this.isPlayerDriven(lead);
+  }
+
+  private outgoing(attacker: Unit, raw: number) {
+    return commanderDamageDealt(raw, this.commanderBuffed(attacker));
+  }
+
+  /** Villagers are never commander escorts. Archers and defensive buildings take the extra cut. */
+  private incoming(target: Unit | Villager, raw: number, fromArcherOrTower: boolean) {
+    if (!("fromBarracks" in target)) return raw;
+    return commanderDamageTaken(raw, this.commanderBuffed(target), fromArcherOrTower);
   }
 
   private fightMilitary(u: Unit, target: Unit | Villager, team: Team, dt: number) {
@@ -5760,6 +5986,7 @@ export class GameSim {
     if (u.kind === "rammer") dmg *= u.keepMult;
     else if (u.kind === "archer") dmg *= 0.65;
     if (this.inChurchAura(u)) dmg *= CHURCH_AURA_DAMAGE;
+    dmg = this.outgoing(u, dmg);
     b.hp -= dmg;
     u.attackTimer = u.attackCooldown;
     this.emitCombat(
@@ -5830,7 +6057,9 @@ export class GameSim {
           u.orderTargetBarricadeId = undefined;
           u.rallyPoint = { ...u.pos };
         } else if (u.attackTimer <= 0) {
-          const chip = u.kind === "archer" ? Math.max(2, Math.round(u.damage * 0.5)) : barricadeStrike(u.kind);
+          const chip = Math.round(
+            this.outgoing(u, u.kind === "archer" ? Math.max(2, u.damage * 0.5) : barricadeStrike(u.kind)),
+          );
           bar.hp -= chip;
           u.attackTimer = u.attackCooldown;
           this.emitCombat(
@@ -5857,7 +6086,7 @@ export class GameSim {
       const reach = u.kind === "archer" ? ARCHER_RANGE : 34;
       if (dist(u.pos, keep.pos) <= reach) {
         if (u.attackTimer <= 0) {
-          const dmg = u.damage * u.keepMult * (this.inChurchAura(u) ? CHURCH_AURA_DAMAGE : 1);
+          const dmg = this.outgoing(u, u.damage * u.keepMult * (this.inChurchAura(u) ? CHURCH_AURA_DAMAGE : 1));
           keep.hp -= dmg;
           keep.hitFlash = 0.2;
           this.emitCombat(
@@ -5886,7 +6115,7 @@ export class GameSim {
           this.emitCombat("ramImpact", u.pos, blockingBar.pos, team);
           this.addFloat("CRUSH", blockingBar.pos.x, blockingBar.pos.y - 9, "#e4bd77");
         } else if (u.attackTimer <= 0) {
-          const chip = barricadeStrike(u.kind);
+          const chip = Math.round(this.outgoing(u, barricadeStrike(u.kind)));
           blockingBar.hp -= chip;
           u.attackTimer = u.attackCooldown;
           this.emitCombat(blockingBar.hp > 0 ? "woodHit" : "woodBreak", u.pos, blockingBar.pos, team);
@@ -6191,7 +6420,7 @@ export class GameSim {
           continue;
         } else {
           if (u.attackTimer <= 0) {
-            const chip = barricadeStrike(u.kind);
+            const chip = Math.round(this.outgoing(u, barricadeStrike(u.kind)));
             barricade.hp -= chip;
             u.attackTimer = u.attackCooldown;
             this.emitCombat(
@@ -6218,7 +6447,7 @@ export class GameSim {
       if (atGate) {
         if (u.attackTimer <= 0) {
           const keep = this.teamKeep(enemyTeam);
-          const dmg = u.damage * u.keepMult;
+          const dmg = this.outgoing(u, u.damage * u.keepMult);
           keep.hp -= dmg;
           keep.hitFlash = 0.2;
           this.emitCombat(u.kind === "rammer" ? "ramImpact" : "keepImpact", u.pos, keep.pos, team);
@@ -6988,9 +7217,10 @@ export class GameSim {
           moveTowards(v.pos, target.pos, PEON_FIGHT_SPEED, dt);
         } else if (v.attackTimer <= 0) {
           // Barracks soldiers and wave creeps both take peon damage — no immunity.
-          target.hp -= v.damage;
+          const dealt = this.incoming(target, v.damage, false);
+          target.hp -= dealt;
           v.attackTimer = PEON_ATTACK_CD;
-          this.addFloat(`-${this.strikeText(v.damage)}`, target.pos.x, target.pos.y - 8, "#c8e090");
+          this.addFloat(`-${this.strikeText(dealt)}`, target.pos.x, target.pos.y - 8, "#c8e090");
         }
         return;
       }
@@ -7317,7 +7547,7 @@ export class GameSim {
     const defense = [0, 0, 0];
     const pads = this.getPads(team);
     for (const building of this.getBuildings(team)) {
-      if (building.kind === "house" || building.kind === "barracks") continue;
+      if (building.kind === "house" || building.kind === "barracks" || building.kind === "market") continue;
       const pad = pads.find((p) => p.id === building.padId);
       if (!pad) continue;
       for (const lane of pad.laneCoverage) defense[lane] += 1;
@@ -7512,7 +7742,7 @@ export class GameSim {
 
   aiUpgradeDefense(preference: "damage" | "rate" | "adaptive" = "adaptive", team: Team = "foe") {
     const towers = this.state.buildings.filter(
-      (b) => b.team === team && b.kind !== "barracks" && b.kind !== "house",
+      (b) => b.team === team && b.kind !== "barracks" && b.kind !== "house" && b.kind !== "market",
     );
     if (towers.length === 0) return false;
     const observed = this.aiObservedHumanUnits(430, team);
@@ -7714,7 +7944,7 @@ export class GameSim {
     const observed = this.aiObservedHumanUnits(430, team);
     const enemy = this.enemyOf(team);
     const yourTowers = this.state.buildings.filter(
-      (b) => b.team === enemy && b.kind !== "barracks" && b.kind !== "house",
+      (b) => b.team === enemy && b.kind !== "barracks" && b.kind !== "house" && b.kind !== "market",
     ).length;
     const ranged = observed.filter((u) => u.kind === "archer").length;
     const fast = observed.filter((u) => u.kind === "runner" || u.kind === "raider").length;
@@ -7861,6 +8091,20 @@ export class GameSim {
         case "church":
           this.consecrateHouse(team, order.buildingId);
           break;
+        case "market":
+          this.raiseMarket(team, order.buildingId);
+          break;
+        case "trade":
+          if (order.resource === "wood" || order.resource === "gold") {
+            if (order.side === "buy" || order.side === "sell") this.applyTrade(team, order.resource, order.side);
+          }
+          break;
+        case "commanderRally":
+          this.applyFieldRally(team, playerId, order.on, {
+            buildingId: order.buildingId,
+            keep: order.keep === true,
+          });
+          break;
         case "keepUpgrade":
           this.upgradeKeep(team);
           break;
@@ -7895,6 +8139,7 @@ export class GameSim {
           const drive = this.remoteDrivers.get(playerId);
           if (!drive) break;
           drive.body = body.id;
+          this.rememberDriven(playerId, body.id);
           drive.keys = { w: order.w, a: order.a, s: order.s, d: order.d };
           drive.yaw = order.yaw;
           body.facing = order.yaw;
@@ -7919,6 +8164,7 @@ export class GameSim {
           const drive = this.remoteDrivers.get(playerId);
           if (!drive) break;
           drive.body = body.id;
+          this.rememberDriven(playerId, body.id);
           drive.keys = { w: false, a: false, s: false, d: false };
           drive.yaw = body.facing ?? (body.team === "you" ? 0 : Math.PI);
           body.facing = drive.yaw;
@@ -7983,6 +8229,8 @@ export class GameSim {
         timeLeft: job.timeLeft,
         totalTime: job.totalTime,
       })),
+      commanderRally: s.keeps[team].commanderRally === true,
+      commanderRallyPlayer: s.keeps[team].commanderRallyPlayer,
     });
     return {
       mapId: s.mapId,
@@ -8078,6 +8326,8 @@ export class GameSim {
         queue: b.queue.map((job) => ({ kind: job.kind, timeLeft: job.timeLeft, totalTime: job.totalTime })),
         rallyX: b.rallyPoint?.x,
         rallyY: b.rallyPoint?.y,
+        commanderRally: b.commanderRally === true,
+        commanderRallyPlayer: b.commanderRallyPlayer,
       })),
       nodes: s.nodes.map((n) => ({ id: n.id, loadsLeft: n.loadsLeft, workers: n.workers })),
       barricades: s.barricades.map((b) => ({
@@ -8106,6 +8356,11 @@ export class GameSim {
         foe: this.drivenUnitForTeam("foe"),
       },
       drivenBy: this.exportDrivenBy(),
+      market: {
+        you: { ...s.market.you },
+        foe: { ...s.market.foe },
+      },
+      lastDriven: Object.fromEntries(this.lastDriven),
       defendLayer: { you: s.defendLayer.you, foe: s.defendLayer.foe },
       finalDuel: s.finalDuel
         ? {
@@ -8319,6 +8574,34 @@ export class GameSim {
             Number.isFinite(job.totalTime),
         )
         .map((job) => ({ kind: job.kind, timeLeft: job.timeLeft, totalTime: job.totalTime }));
+      s.keeps[team].commanderRally = keep.commanderRally === true;
+      s.keeps[team].commanderRallyPlayer =
+        typeof keep.commanderRallyPlayer === "string" ? keep.commanderRallyPlayer : undefined;
+    }
+    if (snap.market?.you && snap.market?.foe) {
+      const read = (q: { woodBuy: number; woodSell: number; goldBuy: number; goldSell: number } | undefined) =>
+        q && [q.woodBuy, q.woodSell, q.goldBuy, q.goldSell].every((n) => Number.isFinite(n) && n >= 0)
+          ? { woodBuy: q.woodBuy, woodSell: q.woodSell, goldBuy: q.goldBuy, goldSell: q.goldSell }
+          : freshMarketBook();
+      s.market.you = read(snap.market.you);
+      s.market.foe = read(snap.market.foe);
+    }
+    if (snap.lastDriven && typeof snap.lastDriven === "object") {
+      this.lastDriven.clear();
+      for (const [pid, id] of Object.entries(snap.lastDriven)) {
+        if (typeof id === "number" && Number.isFinite(id)) this.lastDriven.set(pid, id);
+      }
+    }
+    if (snap.drivenBy) {
+      for (const [pid, id] of Object.entries(snap.drivenBy)) {
+        if (pid === this.localPlayerId) continue;
+        let drive = this.remoteDrivers.get(pid);
+        if (!drive) {
+          drive = { body: null, keys: { w: false, a: false, s: false, d: false }, yaw: 0, strike: false };
+          this.remoteDrivers.set(pid, drive);
+        }
+        drive.body = typeof id === "number" && Number.isFinite(id) ? id : null;
+      }
     }
     if (snap.keeps[this.localTeam].hitFlash > 0) s.redFlash = Math.max(s.redFlash, 0.18);
 
@@ -8443,6 +8726,8 @@ export class GameSim {
         .map((job) => ({ timeLeft: job.timeLeft, totalTime: job.totalTime })),
       queue: b.queue.map((job) => ({ kind: job.kind, timeLeft: job.timeLeft, totalTime: job.totalTime })),
       rallyPoint: point(b.rallyX, b.rallyY),
+      commanderRally: b.commanderRally === true,
+      commanderRallyPlayer: typeof b.commanderRallyPlayer === "string" ? b.commanderRallyPlayer : undefined,
     }));
     s.barricades = snap.barricades.map((b) => ({
       id: b.id,
@@ -8532,6 +8817,201 @@ export class GameSim {
         this.pendingOwnPad = null;
       }
     }
+  }
+
+  private costText(gold: number, wood: number) {
+    const parts: string[] = [];
+    if (gold > 0) parts.push(`${gold}g`);
+    if (wood > 0) parts.push(`${wood}w`);
+    return parts.join(" · ") || "0";
+  }
+
+  private fieldContact(unit: Unit): { t: "building"; b: Building } | { t: "pad"; pad: Pad } | { t: "keep" } | null {
+    const team = unit.team;
+    let bestB: Building | undefined;
+    let bestD = Infinity;
+    for (const b of this.state.buildings) {
+      if (b.team !== team || b.hp <= 0) continue;
+      const reach = b.kind === "barracks" ? 22 : 16;
+      const d = dist(unit.pos, b.pos);
+      if (d <= reach && d < bestD) {
+        bestD = d;
+        bestB = b;
+      }
+    }
+    if (bestB) {
+      if (bestB.kind === "barracks" || bestB.kind === "church" || bestB.kind === "market") {
+        return { t: "building", b: bestB };
+      }
+      if (bestB.kind === "house" && this.isMidEcoPad(bestB.padId)) return { t: "building", b: bestB };
+      return null;
+    }
+    const taken = new Set(this.state.buildings.filter((b) => b.hp > 0 && b.padId).map((b) => b.padId));
+    let bestPad: Pad | undefined;
+    let bestPd = Infinity;
+    for (const p of this.state.pads) {
+      if (p.team !== team || taken.has(p.id)) continue;
+      const d = dist(unit.pos, p.pos);
+      if (d <= 16 && d < bestPd) {
+        bestPd = d;
+        bestPad = p;
+      }
+    }
+    if (bestPad) return { t: "pad", pad: bestPad };
+    if (dist(unit.pos, this.teamKeep(team).pos) <= 28) return { t: "keep" };
+    return null;
+  }
+
+  private fieldSiteUi(view: Team): FieldSiteUi | null {
+    const s = this.state;
+    if (s.phase !== "running" || s.arena || this.matchMode === "arena") return null;
+    const body =
+      s.possessedId != null ? s.units.find((u) => u.id === s.possessedId && u.hp > 0 && u.team === view) : undefined;
+    if (!body) return null;
+    const contact = this.fieldContact(body);
+    if (!contact) return null;
+    const gold = s.gold[view];
+    const wood = s.wood[view];
+    const afford = (g: number, w: number) => gold >= g && wood >= w;
+    const room = this.armySlotsUsed(view) < this.armyCap(view);
+    if (contact.t === "pad") {
+      const kinds: BuildingKind[] =
+        contact.pad.zone === "combat" ? ["watchtower", "ballista", "catapult", "barracks"] : ["house"];
+      return {
+        kind: "build",
+        padId: contact.pad.id,
+        title: "Build",
+        choices: kinds.map((kind) => {
+          const cost = BUILD_COST[kind];
+          return {
+            id: kind,
+            label: buildingName(kind),
+            gold: cost.gold,
+            wood: cost.wood,
+            enabled: afford(cost.gold, cost.wood),
+            price: this.costText(cost.gold, cost.wood),
+          };
+        }),
+      };
+    }
+    if (contact.t === "keep") {
+      const keep = s.keeps[view];
+      const choices = keep.upgraded
+        ? (["raider", "brute"] as const).map((kind) => {
+            const def = UNIT_DEFS[kind];
+            const g = def.cost ?? 0;
+            const w = def.woodCost ?? 0;
+            return {
+              id: kind,
+              label: def.label,
+              gold: g,
+              wood: w,
+              enabled: afford(g, w) && room,
+              price: this.costText(g, w),
+            };
+          })
+        : [];
+      return {
+        kind: "train",
+        buildingId: 0,
+        keep: true,
+        title: "Keep",
+        rally: keep.commanderRally === true,
+        multi: false,
+        choices,
+        freeLines: keep.upgraded ? [] : ["Upgrade the keep to train raiders and brutes."],
+      };
+    }
+    const b = contact.b;
+    if (b.kind === "market") {
+      const q = s.market[view];
+      return {
+        kind: "market",
+        buildingId: b.id,
+        woodBuy: q.woodBuy,
+        woodSell: q.woodSell,
+        goldBuy: q.goldBuy,
+        goldSell: q.goldSell,
+        canBuyWood: gold >= q.woodBuy,
+        canSellWood: wood >= MARKET_LOT,
+        canBuyGold: wood >= q.goldBuy,
+        canSellGold: gold >= MARKET_LOT,
+      };
+    }
+    if (b.kind === "house") {
+      return {
+        kind: "chapel",
+        buildingId: b.id,
+        choices: [
+          {
+            id: "church",
+            label: "Church",
+            gold: CHURCH_UPGRADE_GOLD,
+            wood: 0,
+            enabled: gold >= CHURCH_UPGRADE_GOLD,
+            price: `${CHURCH_UPGRADE_GOLD}g`,
+          },
+          {
+            id: "market",
+            label: "Market",
+            gold: MARKET_UPGRADE_GOLD,
+            wood: MARKET_UPGRADE_WOOD,
+            enabled: afford(MARKET_UPGRADE_GOLD, MARKET_UPGRADE_WOOD),
+            price: this.costText(MARKET_UPGRADE_GOLD, MARKET_UPGRADE_WOOD),
+          },
+        ],
+      };
+    }
+    if (b.kind === "church") {
+      const def = UNIT_DEFS.templar;
+      const g = def.cost ?? 0;
+      const w = def.woodCost ?? 0;
+      return {
+        kind: "train",
+        buildingId: b.id,
+        keep: false,
+        title: b.cathedral ? "Cathedral" : "Church",
+        rally: b.commanderRally === true,
+        multi: false,
+        choices: b.cathedral
+          ? [
+              {
+                id: "templar",
+                label: def.label,
+                gold: g,
+                wood: w,
+                enabled: afford(g, w) && room,
+                price: this.costText(g, w),
+              },
+            ]
+          : [],
+        freeLines: ["Soldier · free", "Templar · free"],
+      };
+    }
+    const multi = this.livingSelectedBarracks().length > 1;
+    return {
+      kind: "train",
+      buildingId: b.id,
+      keep: false,
+      title: "Barracks",
+      rally: b.commanderRally === true,
+      multi,
+      choices: TRAIN_ORDER.map((kind) => {
+        const def = UNIT_DEFS[kind];
+        const g = def.cost ?? 0;
+        const w = def.woodCost ?? 0;
+        const unlocked = unitUnlocked(kind, s.keepLevel, this.campaignMission == null);
+        return {
+          id: kind,
+          label: def.label,
+          gold: g,
+          wood: w,
+          enabled: unlocked && afford(g, w) && room,
+          price: this.costText(g, w),
+        };
+      }),
+      freeLines: multi ? ["Each new unit goes to the shortest queue."] : [],
+    };
   }
 
   getUiSnapshot(): UiSnapshot {
@@ -8627,7 +9107,7 @@ export class GameSim {
           }))
         : [];
     const canUpgradeStructure =
-      !!selected && selectedIsYours && selected.kind !== "house" && selected.kind !== "church";
+      !!selected && selectedIsYours && selected.kind !== "house" && selected.kind !== "church" && selected.kind !== "market";
 
     const brain = foeBrainStats();
     const body = s.possessedId != null ? s.units.find((u) => u.id === s.possessedId && u.hp > 0) : undefined;
@@ -8773,6 +9253,15 @@ export class GameSim {
       missionName: this.campaignMission?.nation ?? "",
       freshUnlock: this.lastUnlock,
       freshHold: this.freshHold,
+      fieldSite: this.fieldSiteUi(view),
+      marketQuotes: { ...s.market[view] },
+      selectedCanRaiseMarket:
+        !!selected &&
+        selectedIsYours &&
+        selected.kind === "house" &&
+        this.isMidEcoPad(selected.padId) &&
+        s.gold[view] >= MARKET_UPGRADE_GOLD &&
+        s.wood[view] >= MARKET_UPGRADE_WOOD,
       possessed: body
         ? {
             id: body.id,
@@ -8953,6 +9442,7 @@ export function buildingName(kind: BuildingKind) {
   if (kind === "catapult") return "Catapult";
   if (kind === "house") return "House";
   if (kind === "church") return "Church";
+  if (kind === "market") return "Market";
   if (kind === "barricade") return "Barricade";
   return "Barracks";
 }

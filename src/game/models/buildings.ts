@@ -380,6 +380,26 @@ export function buildHouseModel(team: Team) {
   return finish(g);
 }
 
+/** House stall with a cloth awning. Not a church: no cross, no aura. */
+export function buildMarketModel(team: Team) {
+  const g = buildHouseModel(team);
+  const cloth = new THREE.MeshStandardMaterial({
+    color: team === "you" ? 0xc4563a : 0x8d3d55,
+    roughness: 0.72,
+    metalness: 0.04,
+  });
+  const wood = new THREE.MeshStandardMaterial({ color: 0x6b4a2a, roughness: 0.8 });
+  const awning = new THREE.Mesh(new THREE.BoxGeometry(16, 0.35, 8), cloth);
+  awning.position.set(0, 15.2, 9);
+  const pole = (x: number) => {
+    const p = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 6, 6), wood);
+    p.position.set(x, 12.2, 12.2);
+    return p;
+  };
+  g.add(awning, pole(-6.5), pole(6.5));
+  return g;
+}
+
 /** Barracks hall consecrated — house footprint with a large rooftop cross. */
 export function buildChurchModel(team: Team) {
   const g = buildHouseModel(team);

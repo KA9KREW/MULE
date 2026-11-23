@@ -10,6 +10,8 @@ export interface DetailSheetProps {
   onUpgradeRate: () => void;
   onRaze: () => void;
   onConsecrate: () => void;
+  onRaiseMarket: () => void;
+  onTrade: (resource: "wood" | "gold", side: "buy" | "sell") => void;
   onUpgradeKeep: () => void;
   onEnqueueKeep: (kind: KeepTrainKind) => void;
   onCancelKeepQueue: (index: number) => void;
@@ -53,6 +55,8 @@ export function DetailSheet({
   onUpgradeRate,
   onRaze,
   onConsecrate,
+  onRaiseMarket,
+  onTrade,
   onUpgradeKeep,
   onEnqueueKeep,
   onCancelKeepQueue,
@@ -346,6 +350,7 @@ export function DetailSheet({
   const isChurch = ui.selectedBuildingKind === "church";
   const isTrainHall = isBarracks;
   const isHouse = ui.selectedBuildingKind === "house";
+  const isMarket = ui.selectedBuildingKind === "market";
   const isBallista = ui.selectedBuildingKind === "ballista";
   const structureName = ui.selectedIsCathedral ? "Cathedral" : buildingName(ui.selectedBuildingKind!);
   const templarAfford = ui.yourGold >= ui.templarTrainCost.gold && ui.yourWood >= ui.templarTrainCost.wood;
@@ -380,7 +385,58 @@ export function DetailSheet({
           Consecrate church · 500g
         </button>
       )}
-      {!isHouse && !isTrainHall && !isChurch && STRUCTURE_ROLE[ui.selectedBuildingKind!] && (
+      {isHouse && !isEnemy && ui.selectedIsMidHouse && (
+        <button
+          type="button"
+          className={`train-opt${ui.selectedCanRaiseMarket ? " afford" : ""}`}
+          disabled={!ui.selectedCanRaiseMarket}
+          onClick={onRaiseMarket}
+        >
+          <strong>Market</strong>
+          <em>100g · 100w</em>
+        </button>
+      )}
+      {isMarket && !isEnemy && (
+        <div className="train-options">
+          <button
+            type="button"
+            className={`train-opt${ui.yourGold >= ui.marketQuotes.woodBuy ? " afford" : ""}`}
+            disabled={ui.yourGold < ui.marketQuotes.woodBuy}
+            onClick={() => onTrade("wood", "buy")}
+          >
+            <strong>Buy wood</strong>
+            <em>{ui.marketQuotes.woodBuy}g</em>
+          </button>
+          <button
+            type="button"
+            className={`train-opt${ui.yourWood >= 100 ? " afford" : ""}`}
+            disabled={ui.yourWood < 100}
+            onClick={() => onTrade("wood", "sell")}
+          >
+            <strong>Sell wood</strong>
+            <em>{ui.marketQuotes.woodSell}g</em>
+          </button>
+          <button
+            type="button"
+            className={`train-opt${ui.yourWood >= ui.marketQuotes.goldBuy ? " afford" : ""}`}
+            disabled={ui.yourWood < ui.marketQuotes.goldBuy}
+            onClick={() => onTrade("gold", "buy")}
+          >
+            <strong>Buy gold</strong>
+            <em>{ui.marketQuotes.goldBuy}w</em>
+          </button>
+          <button
+            type="button"
+            className={`train-opt${ui.yourGold >= 100 ? " afford" : ""}`}
+            disabled={ui.yourGold < 100}
+            onClick={() => onTrade("gold", "sell")}
+          >
+            <strong>Sell gold</strong>
+            <em>{ui.marketQuotes.goldSell}w</em>
+          </button>
+        </div>
+      )}
+      {!isHouse && !isTrainHall && !isChurch && !isMarket && STRUCTURE_ROLE[ui.selectedBuildingKind!] && (
         <p className="detail-note">{STRUCTURE_ROLE[ui.selectedBuildingKind!]}</p>
       )}
       {isChurch && !ui.selectedIsCathedral && <p className="detail-note">{STRUCTURE_ROLE.church}</p>}
@@ -435,7 +491,7 @@ export function DetailSheet({
         </>
       )}
 
-      {!isTrainHall && !isHouse && !isChurch && (
+      {!isTrainHall && !isHouse && !isChurch && !isMarket && (
         <>
           <div className="rank-row">
             <span>Damage</span>
@@ -539,7 +595,7 @@ export function DetailSheet({
 
       {!isEnemy && (
         <div className="detail-actions">
-          {!isHouse && !isChurch && (
+          {!isHouse && !isChurch && !isMarket && (
             <>
               <button
                 type="button"

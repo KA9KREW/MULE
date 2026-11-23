@@ -6,7 +6,56 @@ export type KeepTrainKind = "raider" | "brute";
 export type SiegePhase = "packed" | "unpacking" | "ready" | "packing";
 /** Templars queue at a cathedral, not at barracks. Arena starter uses peon. */
 export type UnitKind = WaveUnitKind | TrainKind | "templar" | "peon";
-export type BuildingKind = "watchtower" | "ballista" | "catapult" | "barracks" | "church" | "house" | "barricade";
+export type BuildingKind = "watchtower" | "ballista" | "catapult" | "barracks" | "church" | "house" | "market" | "barricade";
+
+/** Per-team wood/gold exchange. Your trades do not move the other keep's prices. */
+export interface MarketQuotes {
+  /** Gold paid to buy 100 wood. */
+  woodBuy: number;
+  /** Gold gained for selling 100 wood. */
+  woodSell: number;
+  /** Wood paid to buy 100 gold. */
+  goldBuy: number;
+  /** Wood gained for selling 100 gold. */
+  goldSell: number;
+}
+
+export interface FieldChoice {
+  id: string;
+  label: string;
+  gold: number;
+  wood: number;
+  enabled: boolean;
+  price: string;
+}
+
+/** Left popup while the local player is taken the field and standing on a site. */
+export type FieldSiteUi =
+  | { kind: "build"; padId: string; title: string; choices: FieldChoice[] }
+  | {
+      kind: "train";
+      /** 0 when the site is the keep. */
+      buildingId: number;
+      keep: boolean;
+      title: string;
+      rally: boolean;
+      multi: boolean;
+      choices: FieldChoice[];
+      freeLines: string[];
+    }
+  | { kind: "chapel"; buildingId: number; choices: FieldChoice[] }
+  | {
+      kind: "market";
+      buildingId: number;
+      woodBuy: number;
+      woodSell: number;
+      goldBuy: number;
+      goldSell: number;
+      canBuyWood: boolean;
+      canSellWood: boolean;
+      canBuyGold: boolean;
+      canSellGold: boolean;
+    };
 export type ResourceKind = "pine" | "copper";
 /** eco = keep-yard houses; midEco = purple no-man's-land houses (army pop). */
 export type PadZone = "combat" | "eco" | "midEco";
@@ -43,6 +92,9 @@ export interface Keep {
   upgraded: boolean;
   /** Raider and brute jobs. Only filled after the keep is upgraded. */
   troopQueue: KeepTrainJob[];
+  /** New keep troops guard the player who turned this on. */
+  commanderRally?: boolean;
+  commanderRallyPlayer?: string;
 }
 
 export interface Unit {
@@ -184,6 +236,9 @@ export interface Building {
   cathedral?: boolean;
   /** Paid templar jobs. Only a cathedral fills this. */
   templarQueue?: TemplarJob[];
+  /** New troops from this hall guard the player who turned this on. */
+  commanderRally?: boolean;
+  commanderRallyPlayer?: string;
 }
 
 export interface Pad {
@@ -364,6 +419,8 @@ export interface GameState {
   keeps: Record<Team, Keep>;
   gold: Record<Team, number>;
   wood: Record<Team, number>;
+  /** Wood/gold exchange. Each keep has its own quotes. */
+  market: Record<Team, MarketQuotes>;
   units: Unit[];
   buildings: Building[];
   villagers: Villager[];
@@ -614,6 +671,12 @@ export interface UiSnapshot {
   freshHold: boolean;
   /** Set while the local player is in first person on a soldier. */
   possessed: PossessedUi | null;
+  /** Build, train, church/market choice, or market trades under the fielded unit. */
+  fieldSite: FieldSiteUi | null;
+  /** This keep's exchange prices. */
+  marketQuotes: MarketQuotes;
+  /** Purple midfield house can still be raised into a market. */
+  selectedCanRaiseMarket: boolean;
   /** Active bridge layer to hold, or null for stand-down. */
   defendLayer: DefendLayerId | null;
   /** Bridge belts available on this map (1–3). */

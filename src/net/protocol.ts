@@ -42,6 +42,10 @@ export type RemoteOrder =
   | { t: "upgrade"; team: Team; buildingId: number; kind: "damage" | "rate" }
   | { t: "raze"; team: Team; buildingId: number }
   | { t: "church"; team: Team; buildingId: number }
+  | { t: "market"; team: Team; buildingId: number }
+  | { t: "trade"; team: Team; resource: "wood" | "gold"; side: "buy" | "sell" }
+  /** Per-building (or keep) rally so new troops guard that player's fielded soldier. */
+  | { t: "commanderRally"; team: Team; on: boolean; buildingId?: number; keep?: boolean }
   | { t: "keepUpgrade"; team: Team }
   | { t: "keepTrain"; team: Team; kind: KeepTrainKind }
   | { t: "cancelKeep"; team: Team; index: number }
@@ -81,6 +85,8 @@ export interface SnapKeep {
   /** Absent on older pictures; treat missing as not upgraded. */
   upgraded?: boolean;
   troopQueue?: { kind: KeepTrainKind; timeLeft: number; totalTime: number }[];
+  commanderRally?: boolean;
+  commanderRallyPlayer?: string;
 }
 
 export interface SnapUnit {
@@ -158,6 +164,8 @@ export interface SnapBuilding {
   churchTemplarTimer?: number;
   cathedral?: boolean;
   templarQueue?: { timeLeft: number; totalTime: number }[];
+  commanderRally?: boolean;
+  commanderRallyPlayer?: string;
 }
 
 export interface SnapNode {
@@ -224,6 +232,10 @@ export interface MatchSnapshot {
   drivenBy?: Record<string, number | null>;
   /** Bridge belt each team is holding. */
   defendLayer?: Record<Team, DefendLayerId | null>;
+  /** Per-keep exchange. Missing pictures use the opening 100/70 quotes. */
+  market?: Record<Team, { woodBuy: number; woodSell: number; goldBuy: number; goldSell: number }>;
+  /** Last soldier each player took the field in. Used when they are not fielded at spawn. */
+  lastDriven?: Record<string, number>;
   /** Skirmish Final Duel status. */
   finalDuel?: {
     phase: "off" | "proposed" | "active";
@@ -287,6 +299,9 @@ const ORDER_TYPES = new Set<RemoteOrder["t"]>([
   "upgrade",
   "raze",
   "church",
+  "market",
+  "trade",
+  "commanderRally",
   "keepUpgrade",
   "keepTrain",
   "cancelKeep",
