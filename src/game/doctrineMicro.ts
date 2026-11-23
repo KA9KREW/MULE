@@ -16,6 +16,7 @@ const BUILDING_PRIORITY: Record<BuildingKind, number> = {
   church: 66,
   barracks: 56,
   barricade: 45,
+  market: 30,
   house: 24,
 };
 

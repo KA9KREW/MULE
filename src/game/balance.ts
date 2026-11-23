@@ -1,4 +1,4 @@
-import type { BuildingKind, LaneCount, Team, TrainKind, UnitKind, WaveSpec } from "./types";
+import type { BuildingKind, LaneCount, MarketQuotes, Team, TrainKind, UnitKind, WaveSpec } from "./types";
 
 export const WORLD_W = 400;
 /** Tall field so the mid strip between keeps is a real no-man's-land. */
@@ -46,6 +46,15 @@ export const MID_HOUSE_ARMY_POP = 5;
 export const CHURCH_ARMY_POP = 15;
 /** Purple midfield house → church. */
 export const CHURCH_UPGRADE_GOLD = 500;
+/** Purple midfield house → market. Sibling of consecration; the pad is one or the other. */
+export const MARKET_UPGRADE_GOLD = 100;
+export const MARKET_UPGRADE_WOOD = 100;
+/** Exchange lot. Prices are for this much of the resource. */
+export const MARKET_LOT = 100;
+/** Sell price never drops below this. Buy stays one spread above it. */
+export const MARKET_SELL_FLOOR = 20;
+export const MARKET_SPREAD = 30;
+export const MARKET_PRICE_STEP = 3;
 /** Free soldier interval from a consecrated church. */
 export const CHURCH_LEVY_INTERVAL = 10;
 /** Free templar interval from a consecrated church. */
@@ -71,6 +80,43 @@ export const BRUTE_TRAIN_TIME = 8;
 export const TEMPLAR_TRAIN_GOLD = 200;
 export const TEMPLAR_TRAIN_WOOD = 200;
 export const TEMPLAR_TRAIN_TIME = 12;
+/** Units guard-following a player-driven soldier deal this much of their damage. */
+export const COMMANDER_ATTACK_MULT = 1.2;
+/** Those same units take this fraction of incoming damage. */
+export const COMMANDER_DEFENCE_MULT = 0.8;
+/** Extra reduction vs archers and watchtower / ballista / catapult shots. Stacks with defence. */
+export const COMMANDER_RANGED_MULT = 0.8;
+
+export function commanderDamageDealt(raw: number, buffed: boolean) {
+  if (!buffed || !Number.isFinite(raw)) return raw;
+  return raw * COMMANDER_ATTACK_MULT;
+}
+
+/**
+ * Damage after the commander guard buff.
+ * General defence is ×0.8. Archer and defensive-building hits are ×0.8 again (×0.64).
+ */
+export function commanderDamageTaken(raw: number, buffed: boolean, fromArcherOrTower: boolean) {
+  if (!buffed || !Number.isFinite(raw)) return raw;
+  const mult = fromArcherOrTower ? COMMANDER_DEFENCE_MULT * COMMANDER_RANGED_MULT : COMMANDER_DEFENCE_MULT;
+  return raw * mult;
+}
+
+export function freshMarketBook(): MarketQuotes {
+  return { woodBuy: 100, woodSell: 70, goldBuy: 100, goldSell: 70 };
+}
+
+/** Buy raises both prices by 3. Sell lowers both by 3. Sell floors at 20, so buy floors at 50. */
+export function shiftMarketBook(book: MarketQuotes, resource: "wood" | "gold", side: "buy" | "sell"): MarketQuotes {
+  const delta = side === "buy" ? MARKET_PRICE_STEP : -MARKET_PRICE_STEP;
+  if (resource === "wood") {
+    const woodSell = Math.max(MARKET_SELL_FLOOR, book.woodSell + delta);
+    return { ...book, woodSell, woodBuy: woodSell + MARKET_SPREAD };
+  }
+  const goldSell = Math.max(MARKET_SELL_FLOOR, book.goldSell + delta);
+  return { ...book, goldSell, goldBuy: goldSell + MARKET_SPREAD };
+}
+
 /** Blessing radius around a church (sim units). */
 export const CHURCH_AURA_RANGE = 95;
 export const CHURCH_AURA_DAMAGE = 1.25;
@@ -94,6 +140,7 @@ export const BUILD_COST: Record<BuildingKind, ResCost> = {
   barracks: { gold: 100, wood: 80 },
   church: { gold: 100, wood: 80 },
   house: { gold: 30, wood: 55 },
+  market: { gold: MARKET_UPGRADE_GOLD, wood: MARKET_UPGRADE_WOOD },
   barricade: { gold: 8, wood: 30 },
 };
 
@@ -104,6 +151,7 @@ export const BUILD_RANGE: Record<BuildingKind, number> = {
   barracks: 0,
   church: 0,
   house: 0,
+  market: 0,
   barricade: 0,
 };
 
@@ -136,6 +184,8 @@ export function buildingPickFootprint(kind: BuildingKind): PickVolume & { upper?
     case "church":
       // House hall, plus a narrow rooftop cross (arm is 12 wide and 1.4 deep).
       return { rx: 15.5, rz: 12.5, top: 26, upper: { rx: 6.5, rz: 1.6, top: 44 } };
+    case "market":
+      return { rx: 15.5, rz: 12.5, top: 26 };
     case "barricade":
       // Logs are 43 long and 3.2 deep. Picking uses the beam test; this is the flat fallback.
       return { rx: 22, rz: 2.6, top: 13 };
@@ -253,6 +303,7 @@ export const BUILD_HP: Record<BuildingKind, number> = {
   barracks: 52,
   church: 68,
   house: 36,
+  market: 44,
   barricade: BARRICADE_HP,
 };
 
@@ -275,7 +326,8 @@ export function isTrebuchetBuilding(kind: BuildingKind) {
     kind === "catapult" ||
     kind === "barracks" ||
     kind === "church" ||
-    kind === "house"
+    kind === "house" ||
+    kind === "market"
   );
 }
 
@@ -322,6 +374,7 @@ export const BUILD_DAMAGE: Record<BuildingKind, number> = {
   barracks: 0,
   church: 0,
   house: 0,
+  market: 0,
   barricade: 0,
 };
 
@@ -332,6 +385,7 @@ export const BUILD_COOLDOWN: Record<BuildingKind, number> = {
   barracks: 1,
   church: 1,
   house: 1,
+  market: 1,
   barricade: 1,
 };
 

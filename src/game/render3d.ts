@@ -41,6 +41,7 @@ import {
   buildCatapultModel,
   buildChurchModel,
   buildHouseModel,
+  buildMarketModel,
   buildWatchtowerModel,
 } from "./models/buildings";
 import { CHURCH_AURA_RANGE } from "./balance";
@@ -2178,6 +2179,7 @@ export class GameRenderer {
     if (kind === "catapult") return buildCatapultModel(team);
     if (kind === "house") return buildHouseModel(team);
     if (kind === "church") return buildChurchModel(team);
+    if (kind === "market") return buildMarketModel(team);
     return buildBarracksModel(team);
   }
 

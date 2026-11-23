@@ -13,6 +13,7 @@ import { BASE_ARMY_CAP, BUILD_COST } from "./game/balance";
 import { Hud } from "./ui/Hud";
 import { BuildBar } from "./ui/BuildBar";
 import { DetailSheet } from "./ui/DetailSheet";
+import { FieldSitePanel } from "./ui/FieldSitePanel";
 import { KeepTugBar } from "./ui/KeepTugBar";
 import { Overlays } from "./ui/Overlays";
 import { CampaignMap } from "./ui/CampaignMap";
@@ -119,6 +120,9 @@ const defaultUi: UiSnapshot = {
   freshUnlock: "",
   freshHold: false,
   possessed: null,
+  fieldSite: null,
+  marketQuotes: { woodBuy: 100, woodSell: 70, goldBuy: 100, goldSell: 70 },
+  selectedCanRaiseMarket: false,
   defendLayer: null,
   defendLayers: [],
   arena: false,
@@ -2156,7 +2160,52 @@ export default function App() {
           )}
           <div className="sheet-dock">
             <div className="sheet-slot">
-            {!ui.arena && (
+            {ui.fieldSite && (
+              <FieldSitePanel
+                site={ui.fieldSite}
+                onBuild={(kind, padId) => {
+                  sim.buildOnPad(kind, padId);
+                  refreshUi();
+                  beep(420);
+                }}
+                onTrain={(kind, buildingId) => {
+                  sim.fieldEnqueueTrain(kind, buildingId);
+                  refreshUi();
+                  beep(340);
+                }}
+                onKeepTrain={(kind) => {
+                  sim.enqueueKeepTrain(kind);
+                  refreshUi();
+                  beep(340);
+                }}
+                onTemplar={(buildingId) => {
+                  sim.fieldEnqueueTemplar(buildingId);
+                  refreshUi();
+                  beep(360);
+                }}
+                onChurch={(buildingId) => {
+                  sim.fieldConsecrate(buildingId);
+                  refreshUi();
+                  beep(480);
+                }}
+                onMarket={(buildingId) => {
+                  sim.fieldRaiseMarket(buildingId);
+                  refreshUi();
+                  beep(460);
+                }}
+                onTrade={(resource, side) => {
+                  sim.trade(resource, side);
+                  refreshUi();
+                  beep(380);
+                }}
+                onRally={(on, target) => {
+                  sim.setFieldRally(on, target);
+                  refreshUi();
+                  beep(400);
+                }}
+              />
+            )}
+            {!ui.arena && !ui.fieldSite && (
             <DetailSheet
             ui={ui}
             onClose={() => {
@@ -2185,6 +2234,16 @@ export default function App() {
               sim.consecrateSelected();
               refreshUi();
               beep(480);
+            }}
+            onRaiseMarket={() => {
+              sim.raiseSelectedMarket();
+              refreshUi();
+              beep(460);
+            }}
+            onTrade={(resource, side) => {
+              sim.trade(resource, side);
+              refreshUi();
+              beep(380);
             }}
             onUpgradeKeep={() => {
               sim.upgradeSelectedKeep();
