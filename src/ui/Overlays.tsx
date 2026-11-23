@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { laneCount } from "../game/map";
+import type { ArcadeDifficulty } from "../game/wavePlanner";
 import {
   buildGithubIssueUrl,
   downloadHumanLogs,
@@ -60,7 +61,7 @@ interface OverlaysProps {
   ui: UiSnapshot;
   hideTitle?: boolean;
   skirmishLive?: boolean;
-  onStart: () => void;
+  onStart: (difficulty: ArcadeDifficulty) => void;
   onArena: () => void;
   onSkirmish: () => void;
   onCampaign: () => void;
@@ -90,6 +91,7 @@ export function Overlays({
   const [shareNote, setShareNote] = useState("");
   const [logNote, setLogNote] = useState("");
   const [arcadeOpen, setArcadeOpen] = useState(false);
+  const [difficulty, setDifficulty] = useState<ArcadeDifficulty>("normal");
   const roads = laneCount(ui.mapSeed);
 
   useEffect(() => {
@@ -161,11 +163,50 @@ export function Overlays({
                 {ui.foeGames > 0 ? ` · ${ui.foeWins}W / ${ui.foeGames} games learned` : " · virgin Q-table"}
               </p>
 
+              <div className="difficulty-block">
+                <span className="difficulty-label" id="arcade-difficulty-label">
+                  Difficulty
+                </span>
+                <div className="difficulty-picker" role="group" aria-labelledby="arcade-difficulty-label">
+                  {(
+                    [
+                      ["easy", "Easy"],
+                      ["normal", "Normal"],
+                      ["hard", "Hard"],
+                    ] as const
+                  ).map(([id, label]) => (
+                    <button
+                      key={id}
+                      type="button"
+                      className="ghost"
+                      aria-pressed={difficulty === id}
+                      onClick={() => setDifficulty(id)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <p className="difficulty-hint">
+                  {difficulty === "easy"
+                    ? "Fewer troops. Levies and raiders lead, siege comes late, and you get longer to build."
+                    : difficulty === "hard"
+                      ? "Denser waves, siege and elites much earlier, and shorter rests between them."
+                      : "The standard arcade march."}
+                </p>
+              </div>
+
               <div className="title-actions">
-                <button type="button" className="cta" onClick={onStart}>
+                <button type="button" className="cta" onClick={() => onStart(difficulty)}>
                   Start
                 </button>
-                <button type="button" className="ghost" onClick={() => setArcadeOpen(false)}>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => {
+                    setDifficulty("normal");
+                    setArcadeOpen(false);
+                  }}
+                >
                   Back
                 </button>
               </div>
@@ -186,7 +227,14 @@ export function Overlays({
                 <button type="button" className="cta" onClick={onCampaign}>
                   Campaign
                 </button>
-                <button type="button" className="ghost" onClick={() => setArcadeOpen(true)}>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => {
+                    setDifficulty("normal");
+                    setArcadeOpen(true);
+                  }}
+                >
                   Arcade mode
                 </button>
                 <button type="button" className="ghost" onClick={onArena}>

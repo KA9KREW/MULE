@@ -244,6 +244,9 @@ export default function App() {
   const layoutRef = useRef(layout);
   layoutRef.current = layout;
   const lockWantedRef = useRef(false);
+  /** Pointer was released on purpose while still fielded, so losing the lock must not leave the body. */
+  const cursorFreeRef = useRef(false);
+  const [cursorFree, setCursorFree] = useState(false);
   const grabPointerLock = useCallback(() => {
     if (layoutRef.current.fpsTouch) {
       lockWantedRef.current = false;
@@ -251,6 +254,10 @@ export default function App() {
     }
     lockWantedRef.current = true;
     canvasRef.current?.requestPointerLock();
+  }, []);
+  const markCursorFree = useCallback((free: boolean) => {
+    cursorFreeRef.current = free;
+    setCursorFree(free);
   }, []);
   const [clusterOpen, setClusterOpen] = useState(false);
   const [menuConfirm, setMenuConfirm] = useState(false);
@@ -663,12 +670,10 @@ export default function App() {
     const onDown = (ev: PointerEvent) => {
       const r = rendererRef.current;
       if (!r) return;
-      if (document.pointerLockElement === canvas) {
-        ev.preventDefault();
-        return;
-      }
-      if (sim.getState().possessedId != null && layoutRef.current.fpsTouch) {
-        ev.preventDefault();
+      if (sim.getState().possessedId != null) {
+        // Skip RTS clicks while fielded. Don't cancel the mouse event when the
+        // pointer is free, or the document handler can't recapture look.
+        if (document.pointerLockElement === canvas || layoutRef.current.fpsTouch) ev.preventDefault();
         return;
       }
       if (ev.button === 2) ev.preventDefault();
@@ -725,7 +730,7 @@ export default function App() {
     const onMove = (ev: PointerEvent) => {
       const r = rendererRef.current;
       if (!r) return;
-      if (document.pointerLockElement === canvas) return;
+      if (sim.getState().possessedId != null) return;
       const lp = longPressRef.current;
       if (lp && lp.pointerId === ev.pointerId && Math.hypot(ev.clientX - lp.x, ev.clientY - lp.y) > LONG_PRESS_SLOP) {
         clearLongPress();
@@ -759,7 +764,10 @@ export default function App() {
     const onUp = (ev: PointerEvent) => {
       const r = rendererRef.current;
       if (!r) return;
-      if (document.pointerLockElement === canvas) return;
+      if (sim.getState().possessedId != null) {
+        clearLongPress();
+        return;
+      }
       clearLongPress();
       const tap = r.onPointerUp(ev);
       const p = local(ev);
@@ -959,7 +967,7 @@ export default function App() {
     };
     const onDblClick = (ev: MouseEvent) => {
       const r = rendererRef.current;
-      if (!r || document.pointerLockElement === canvas) return;
+      if (!r || sim.getState().possessedId != null) return;
       // Do not trigger camera focus-on-ground when a friendly barracks unit was just double-clicked.
       if (performance.now() - lastUnitDblClickAtRef.current < 160) return;
       if (performance.now() - lastBarracksDblClickAtRef.current < 160) return;
@@ -1127,6 +1135,7 @@ export default function App() {
         possessEscAtRef.current = performance.now();
         lastEscFullscreenRef.current = 0;
         lockWantedRef.current = false;
+        markCursorFree(false);
         sim.releasePossess("esc");
         if (document.pointerLockElement) document.exitPointerLock();
         refreshUi();
@@ -1146,6 +1155,7 @@ export default function App() {
         if (step === "v" && !ev.ctrlKey && !ev.metaKey && !ev.altKey && sim.getMatchMode() !== "arena") {
           ev.preventDefault();
           lockWantedRef.current = false;
+          markCursorFree(false);
           sim.releasePossess("esc");
           if (document.pointerLockElement) document.exitPointerLock();
           refreshUi();
@@ -1309,7 +1319,7 @@ export default function App() {
       window.removeEventListener("keyup", onUp);
       window.removeEventListener("blur", onBlur);
     };
-  }, [sim, refreshUi, setPatrol, setArmyPatrol, possessSelected, toggleFullscreen, skirmish.liveRef]);
+  }, [sim, refreshUi, setPatrol, setArmyPatrol, possessSelected, toggleFullscreen, skirmish.liveRef, markCursorFree]);
 
   useEffect(() => {
     let fireHold = 0;
@@ -1329,9 +1339,34 @@ export default function App() {
       r.lookBy(ev.movementX, ev.movementY);
       sim.setPossessYaw(r.getFpsYaw());
     };
+    let handledRightAt = 0;
+    let ignoreUnlock = 0;
+    const freeLookCursor = () => {
+      handledRightAt = performance.now();
+      if (document.pointerLockElement) ignoreUnlock += 1;
+      lockWantedRef.current = false;
+      markCursorFree(true);
+      if (document.pointerLockElement) document.exitPointerLock();
+    };
+    const recaptureLook = () => {
+      handledRightAt = performance.now();
+      markCursorFree(false);
+      grabPointerLock();
+    };
     const onLockChange = () => {
-      if (document.pointerLockElement === canvasRef.current) return;
+      if (document.pointerLockElement === canvasRef.current) {
+        markCursorFree(false);
+        return;
+      }
       clearFireHold();
+      // The unlock from a deliberate right-click must not boot the player, even if
+      // they already clicked the field again before this event arrived.
+      if (ignoreUnlock > 0) {
+        ignoreUnlock -= 1;
+        return;
+      }
+      // Right-click freed the pointer on purpose. Stay in the body.
+      if (cursorFreeRef.current) return;
       // Arena stays in the body; Esc only drops the lock. Next click re-locks.
       if (sim.getMatchMode() === "arena") {
         lockWantedRef.current = true;
@@ -1345,14 +1380,32 @@ export default function App() {
       sim.releasePossess("esc");
       setUi(sim.getUiSnapshot());
     };
+    const onLockError = () => {
+      if (sim.getState().possessedId == null) return;
+      lockWantedRef.current = false;
+      markCursorFree(true);
+    };
     const onStrikeDown = (ev: MouseEvent) => {
-      if (ev.button !== 0) return;
       if (sim.getState().possessedId == null) return;
       if (layoutRef.current.fpsTouch) return;
       const canvas = canvasRef.current;
-      if (document.pointerLockElement !== canvas) {
-        // Click-to-look after Esc, or first lock if Arena started without gesture.
-        grabPointerLock();
+      if (!canvas) return;
+      const locked = document.pointerLockElement === canvas;
+      const onField = ev.target === canvas;
+      if (ev.button === 2) {
+        ev.preventDefault();
+        if (locked) {
+          freeLookCursor();
+          return;
+        }
+        // Second right-click on the battlefield looks again. UI clicks stay free.
+        if (onField && cursorFreeRef.current) recaptureLook();
+        return;
+      }
+      if (ev.button !== 0) return;
+      if (!locked) {
+        // Left-click the battlefield to look. Clicks on the site menu do not recapture.
+        if (onField) recaptureLook();
         return;
       }
       ev.preventDefault();
@@ -1360,22 +1413,32 @@ export default function App() {
       clearFireHold();
       fireHold = window.setInterval(strikeOnce, 160);
     };
+    const onContextMenu = (ev: MouseEvent) => {
+      if (sim.getState().possessedId == null || layoutRef.current.fpsTouch) return;
+      ev.preventDefault();
+      if (performance.now() - handledRightAt < 400) return;
+      if (document.pointerLockElement === canvasRef.current) freeLookCursor();
+    };
     const onStrikeUp = (ev: MouseEvent) => {
       if (ev.button !== 0) return;
       clearFireHold();
     };
     document.addEventListener("mousemove", onLook);
     document.addEventListener("pointerlockchange", onLockChange);
+    document.addEventListener("pointerlockerror", onLockError);
     document.addEventListener("mousedown", onStrikeDown);
     document.addEventListener("mouseup", onStrikeUp);
+    document.addEventListener("contextmenu", onContextMenu);
     return () => {
       clearFireHold();
       document.removeEventListener("mousemove", onLook);
       document.removeEventListener("pointerlockchange", onLockChange);
+      document.removeEventListener("pointerlockerror", onLockError);
       document.removeEventListener("mousedown", onStrikeDown);
       document.removeEventListener("mouseup", onStrikeUp);
+      document.removeEventListener("contextmenu", onContextMenu);
     };
-  }, [sim, grabPointerLock]);
+  }, [sim, grabPointerLock, markCursorFree]);
 
   // Contextual one-shot hints.
   useEffect(() => {
@@ -1428,9 +1491,18 @@ export default function App() {
           "phone-fps",
           "Left stick walks, drag right to look, hold Fire to strike. Kills pull you to third person; pinch or +/− to adjust.",
         );
+        showHint(
+          "phone-fps-site",
+          "On a site, the menu pad moves the highlight and Select builds, queues, or rallies.",
+        );
       } else if (ui.arena) {
         grabPointerLock();
         showHint("arena-fps", "WASD move, mouse look, hold click to strike. Esc unlocks the cursor — click again to look.");
+      } else {
+        showHint(
+          "mouse-fps-site",
+          "Right-click frees the pointer for the site menu. Click the battlefield or right-click again to look. Arrows move the highlight, Enter or F selects.",
+        );
       }
     }
   }, [ui, showHint, sim, grabPointerLock]);
@@ -1440,6 +1512,11 @@ export default function App() {
       setArmyPatrol(false);
     }
   }, [armyPatrolMode, ui.selectedArmy, setArmyPatrol]);
+
+  useEffect(() => {
+    if (ui.possessed || !cursorFreeRef.current) return;
+    markCursorFree(false);
+  }, [ui.possessed, markCursorFree]);
 
   const onSelectBuild = (kind: BuildingKind) => {
     setArmyPatrol(false);
@@ -1470,6 +1547,7 @@ export default function App() {
 
   const returnToMenu = () => {
     lockWantedRef.current = false;
+    markCursorFree(false);
     document.exitPointerLock();
     setMenuConfirm(false);
     setClusterOpen(false);
@@ -1890,7 +1968,14 @@ export default function App() {
           className={`stage${sheetOpen ? " sheet-open" : ""}${ui.possessed ? " possessed" : ""}`}
           ref={stageRef}
         >
-          <canvas ref={canvasRef} className={ui.possessed ? "battlefield possessed" : "battlefield"} />
+          <canvas
+            ref={canvasRef}
+            className={
+              ui.possessed
+                ? `battlefield possessed ${cursorFree ? "cursor-free" : "look-locked"}`
+                : "battlefield"
+            }
+          />
           {ui.phase === "running" && !ui.arena && <KeepTugBar ui={ui} />}
           {ui.possessed && (
             <div className={`fps-hud${ui.possessed.kind === "trebuchet" ? " treb-hud" : ""}`}>
@@ -1969,6 +2054,7 @@ export default function App() {
                   onLeave={() => {
                     if (ui.arena) return;
                     lockWantedRef.current = false;
+                    markCursorFree(false);
                     sim.releasePossess("esc");
                     document.exitPointerLock();
                     refreshUi();
@@ -2045,6 +2131,11 @@ export default function App() {
               >
                 ✕
               </button>
+            </div>
+          )}
+          {ui.possessed && cursorFree && !layout.fpsTouch && (
+            <div className="mode-banner" role="status">
+              Pointer free · click the field or right-click to look
             </div>
           )}
           {patrolMode && ui.selectedPeonCount > 0 && (
@@ -2163,6 +2254,8 @@ export default function App() {
             {ui.fieldSite && (
               <FieldSitePanel
                 site={ui.fieldSite}
+                touch={layout.touch}
+                mouseLook={!layout.fpsTouch}
                 onBuild={(kind, padId) => {
                   sim.buildOnPad(kind, padId);
                   refreshUi();
@@ -2385,10 +2478,11 @@ export default function App() {
               refreshUi();
               beep(220);
             }}
-            onStart={() => {
+            onStart={(difficulty) => {
               if (skirmish.lobby.open || skirmish.lobby.live) return;
               setCampaignOpen(false);
               afterPortalBreak(() => {
+                sim.setArcadeDifficulty(difficulty);
                 sim.setMatchMode("ai");
                 sim.setLocalTeam("you");
                 sim.startMatch();

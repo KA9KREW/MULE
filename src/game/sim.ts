@@ -11,7 +11,6 @@ import {
   BUILD_COST,
   BUILD_DAMAGE,
   BUILD_HP,
-  BUILD_PAUSE,
   BUILD_RANGE,
   CHURCH_ARMY_POP,
   CHURCH_AURA_DAMAGE,
@@ -151,7 +150,7 @@ import {
   computeWaveSpawnFormation,
   separateFriendlyUnits,
 } from "./formation";
-import { planWave, waveStrengthScalar } from "./wavePlanner";
+import { arcadeSidePlans, arcadeTiming, waveStrengthScalar, type ArcadeDifficulty } from "./wavePlanner";
 import { saveHumanLog, type HumanBuildStep, type MatchTimelinePoint } from "./matchLog";
 import {
   awardMatchXp,
@@ -270,6 +269,8 @@ export class GameSim {
   private activeMap: MapDef;
   private controlGroups = new Map<number, { kind: "units" | "villagers"; ids: number[] }>();
   private matchMode: "ai" | "pvp" | "arena" = "ai";
+  /** Arcade only. Campaign and skirmish ignore this and keep the normal march. */
+  private arcadeDifficulty: ArcadeDifficulty = "normal";
   private campaignMission: CampaignMission | null = null;
   private lastUnlock = "";
   /** True when the match that just ended was the first time that march was held. */
@@ -806,6 +807,13 @@ export class GameSim {
     this.matchMode = mode;
   }
 
+  /** Chosen on the arcade start screen and held for that match. */
+  setArcadeDifficulty(difficulty: ArcadeDifficulty) {
+    if (difficulty === "easy" || difficulty === "hard" || difficulty === "normal") {
+      this.arcadeDifficulty = difficulty;
+    }
+  }
+
   /** Headless matches: the south keep runs the same commander as the north. */
   setBothCpu(on: boolean) {
     this.bothCpu = on;
@@ -1213,13 +1221,20 @@ export class GameSim {
     return this.campaignMission ? this.campaignMission.waves : Infinity;
   }
 
+  /** Arcade versus the AI. Campaign marches and human skirmishes stay on Normal. */
+  private enemyWaveDifficulty(): ArcadeDifficulty {
+    if (this.matchMode !== "ai" || this.campaignMission) return "normal";
+    return this.arcadeDifficulty;
+  }
+
   startMatch() {
     this.campaignMission = null;
     this.lastUnlock = "";
     this.freshHold = false;
     this.state.phase = "running";
     this.state.wavePhase = "build";
-    this.state.buildTimer = FIRST_BUILD;
+    const timing = arcadeTiming(this.enemyWaveDifficulty());
+    this.state.buildTimer = timing.opening;
     if (this.matchMode === "pvp") {
       this.addToast("Skirmish — both keeps are held by players.");
       return;
@@ -1227,7 +1242,9 @@ export class GameSim {
     notifyAiMatchStart();
     this.resetHumanLog(!this.bothCpu && this.matchMode === "ai" && !this.campaignMission);
     const iq = foeBrainStats().intellect;
-    this.addToast(`Build phase — ${FIRST_BUILD}s until wave 1`);
+    const difficulty = this.enemyWaveDifficulty();
+    const head = difficulty === "easy" ? "Easy" : difficulty === "hard" ? "Hard" : "Build phase";
+    this.addToast(`${head} — ${timing.opening}s until wave 1`);
     this.addToast(`Foe intellect ${iq} — learning your patterns`);
   }
 
@@ -3325,7 +3342,7 @@ export class GameSim {
     if (Number.isFinite(cap)) {
       this.addToast(`Wave ${s.waveIndex}/${cap} — +${income}g`);
     } else {
-      const plan = planWave(s.waveIndex);
+      const plan = arcadeSidePlans(s.waveIndex, 1, this.enemyWaveDifficulty()).foe;
       this.addToast(`Wave ${s.waveIndex}: ${plan.theme} — +${income}g`);
     }
     this.addFloat(`+${income}`, s.keeps.you.pos.x - 30, s.keeps.you.pos.y - 40, "#8cd6ff");
@@ -3371,7 +3388,7 @@ export class GameSim {
       return;
     }
     s.wavePhase = "build";
-    s.buildTimer = BUILD_PAUSE;
+    s.buildTimer = arcadeTiming(this.enemyWaveDifficulty()).between;
   }
 
   private enqueueWave(index: number) {
@@ -3410,8 +3427,9 @@ export class GameSim {
     }
 
     const waveNumber = index + 1;
-    const plan = planWave(waveNumber, lanes.length);
-    // Symmetric mirrored cohesive formations on every road for both keeps.
+    // Arcade spawns a mirrored march for both keeps. The south roster stays the
+    // normal plan; Easy/Hard change only the north (enemy) roster and timing.
+    const { you: youPlan, foe: foePlan } = arcadeSidePlans(waveNumber, lanes.length, this.enemyWaveDifficulty());
     const laneBatches = lanes.map((lane) => {
       const youAnchor = { x: lanePathX(this.activeMap.seed, "you", lane, youY), y: youY };
       const foeAnchor = { x: lanePathX(this.activeMap.seed, "foe", lane, foeY), y: foeY };
@@ -3419,27 +3437,31 @@ export class GameSim {
         lane,
         youBatchId: this.nextWaveBatchId++,
         foeBatchId: this.nextWaveBatchId++,
-        youSlots: computeWaveSpawnFormation(youAnchor, "you", plan.roster, { tightBridge }),
-        foeSlots: computeWaveSpawnFormation(foeAnchor, "foe", plan.roster, { tightBridge }),
+        youSlots: computeWaveSpawnFormation(youAnchor, "you", youPlan.roster, { tightBridge }),
+        foeSlots: computeWaveSpawnFormation(foeAnchor, "foe", foePlan.roster, { tightBridge }),
       };
     });
-    for (let i = 0; i < plan.roster.length; i++) {
-      const kind = plan.roster[i]!;
+    const ranks = Math.max(youPlan.roster.length, foePlan.roster.length);
+    for (let i = 0; i < ranks; i++) {
       for (const b of laneBatches) {
-        this.state.pendingWaveUnits.push({
-          team: "you",
-          kind,
-          lane: b.lane,
-          batchId: b.youBatchId,
-          spawnPos: b.youSlots[i],
-        });
-        this.state.pendingWaveUnits.push({
-          team: "foe",
-          kind,
-          lane: b.lane,
-          batchId: b.foeBatchId,
-          spawnPos: b.foeSlots[i],
-        });
+        if (i < youPlan.roster.length) {
+          this.state.pendingWaveUnits.push({
+            team: "you",
+            kind: youPlan.roster[i]!,
+            lane: b.lane,
+            batchId: b.youBatchId,
+            spawnPos: b.youSlots[i],
+          });
+        }
+        if (i < foePlan.roster.length) {
+          this.state.pendingWaveUnits.push({
+            team: "foe",
+            kind: foePlan.roster[i]!,
+            lane: b.lane,
+            batchId: b.foeBatchId,
+            spawnPos: b.foeSlots[i],
+          });
+        }
       }
     }
   }
@@ -9135,7 +9157,7 @@ export class GameSim {
         ? ""
         : this.campaignMission
           ? this.campaignMission.title
-          : planWave(s.waveIndex > 0 ? s.waveIndex : 1).theme;
+          : arcadeSidePlans(s.waveIndex > 0 ? s.waveIndex : 1, 1, this.enemyWaveDifficulty()).foe.theme;
     return {
       phase: s.phase,
       mapId: s.mapId,

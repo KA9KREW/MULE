@@ -1,4 +1,8 @@
+import { BUILD_PAUSE, FIRST_BUILD } from "./balance";
 import type { UnitKind } from "./types";
+
+/** Arcade march pressure. Normal is the untouched planner. */
+export type ArcadeDifficulty = "easy" | "normal" | "hard";
 
 export interface WavePlan {
   waveNumber: number;
@@ -287,8 +291,46 @@ function scaleCountsForLanes(
  * Plans a cohesive per-lane wave composition for any 1-based `waveNumber`
  * (Waves 1–12 follow iconic escalating themes; Waves 13+ scale endlessly
  * through 5 cycling tactical doctrines).
+ * `normal` (the default) is that curve unchanged. `easy` and `hard` reshape
+ * only an enemy arcade march: slower or faster doctrines, not a flat HP scale.
  */
-export function planWave(waveNumber: number, laneCount = 1): WavePlan {
+export function planWave(
+  waveNumber: number,
+  laneCount = 1,
+  difficulty: ArcadeDifficulty = "normal",
+): WavePlan {
+  if (difficulty === "easy") return planEasyWave(waveNumber, laneCount);
+  if (difficulty === "hard") return planHardWave(waveNumber, laneCount);
+  return planNormalWave(waveNumber, laneCount);
+}
+
+/**
+ * South-keep waves stay on the normal roster. Easy/Hard replace only the north
+ * (enemy) roster so a player's free wave troops are not buffed or nerfed.
+ */
+export function arcadeSidePlans(
+  waveNumber: number,
+  laneCount: number,
+  difficulty: ArcadeDifficulty,
+): { you: WavePlan; foe: WavePlan } {
+  const you = planWave(waveNumber, laneCount, "normal");
+  if (difficulty !== "easy" && difficulty !== "hard") return { you, foe: you };
+  return { you, foe: planWave(waveNumber, laneCount, difficulty) };
+}
+
+/** Opening gather and the rest after each clear. Normal returns the live constants. */
+export function arcadeTiming(difficulty: ArcadeDifficulty): { opening: number; between: number } {
+  if (difficulty === "easy") return { opening: FIRST_BUILD + 14, between: BUILD_PAUSE + 10 };
+  if (difficulty === "hard") {
+    return {
+      opening: Math.max(8, FIRST_BUILD - 9),
+      between: Math.max(6, Math.round(BUILD_PAUSE * 0.5)),
+    };
+  }
+  return { opening: FIRST_BUILD, between: BUILD_PAUSE };
+}
+
+function planNormalWave(waveNumber: number, laneCount: number): WavePlan {
   const n = Math.max(1, Math.floor(waveNumber));
   if (n <= OPENING_WAVES.length) {
     const spec = OPENING_WAVES[n - 1]!;
@@ -297,4 +339,274 @@ export function planWave(waveNumber: number, laneCount = 1): WavePlan {
   const endless = composeEndlessWave(n);
   if (laneCount <= 1) return endless;
   return buildWavePlan(n, endless.theme, scaleCountsForLanes(endless.counts, laneCount));
+}
+
+/**
+ * Easy samples an earlier doctrine, holds siege and elites back, and refunds
+ * some of those bodies as levies and raiders. Headcount lands under Normal.
+ */
+const EASY_SOURCE: readonly number[] = [1, 1, 3, 3, 4, 4, 4, 5, 5, 5, 6, 6, 7, 7, 11, 11, 12];
+
+const EASY_UNLOCK: Partial<Record<UnitKind, number>> = {
+  runner: 6,
+  soldier: 8,
+  ward: 10,
+  brute: 12,
+  rammer: 14,
+  templar: 15,
+  trebuchet: 17,
+};
+
+function easySourceWave(waveNumber: number): number {
+  if (waveNumber <= EASY_SOURCE.length) return EASY_SOURCE[waveNumber - 1]!;
+  // Normal endless begins at wave 13. Easy reaches that doctrine at wave 20.
+  return Math.max(12, waveNumber - 7);
+}
+
+function planEasyWave(waveNumber: number, laneCount: number): WavePlan {
+  const n = Math.max(1, Math.floor(waveNumber));
+  const normal = planNormalWave(n, laneCount);
+  const source = planNormalWave(easySourceWave(n), laneCount);
+  const raw: Partial<Record<UnitKind, number>> = {};
+  let bank = 0;
+
+  for (const [kind, count] of Object.entries(source.counts) as [UnitKind, number][]) {
+    if (count <= 0) continue;
+    const unlock = EASY_UNLOCK[kind];
+    if (unlock !== undefined && n < unlock) {
+      bank += count;
+      continue;
+    }
+    let kept = count;
+    if (kind === "archer") kept = n <= 4 ? Math.min(count, 1) : Math.max(1, Math.round(count * 0.6));
+    else if (kind === "levy" || kind === "raider") kept = Math.max(1, Math.round(count * 0.8));
+    else if (unlock !== undefined) kept = Math.max(1, Math.floor(count * 0.55));
+    else kept = Math.max(1, Math.round(count * 0.75));
+    kept = Math.min(count, kept);
+    bank += count - kept;
+    if (kept > 0) raw[kind] = kept;
+  }
+
+  const refund = Math.round(bank * 0.5);
+  if (refund > 0) {
+    const raiders = n >= 4 ? Math.floor(refund * 0.4) : 0;
+    raw.levy = (raw.levy ?? 0) + (refund - raiders);
+    if (raiders > 0) raw.raider = (raw.raider ?? 0) + raiders;
+  }
+
+  const normalTotal = normal.roster.length;
+  const easyMax = normalTotal <= 1 ? normalTotal : Math.min(Math.floor(normalTotal * 0.62), normalTotal - 1);
+  shapeEasyCounts(raw, Math.max(1, easyMax), n);
+  return buildWavePlan(n, themeFromCounts(raw), raw);
+}
+
+/** Hit an easier headcount while keeping levies and raiders in the squad. */
+function shapeEasyCounts(raw: Partial<Record<UnitKind, number>>, target: number, waveNumber: number) {
+  const dropExtra = (kind: UnitKind, floor: number) => {
+    if ((raw[kind] ?? 0) <= floor) return false;
+    decCount(raw, kind);
+    return true;
+  };
+  let guard = 0;
+  while (sumCounts(raw) > target && guard++ < 400) {
+    const archerFloor = waveNumber <= 4 ? 1 : 2;
+    const raiderFloor = Math.max(1, Math.ceil(target * 0.35));
+    if (dropExtra("soldier", 1)) continue;
+    if (dropExtra("runner", 1)) continue;
+    if (dropExtra("archer", archerFloor)) continue;
+    if (dropExtra("ward", 1)) continue;
+    if (dropExtra("brute", 1)) continue;
+    if (dropExtra("templar", 1)) continue;
+    if (dropExtra("rammer", 1)) continue;
+    if (dropExtra("trebuchet", 1)) continue;
+    if (dropExtra("raider", raiderFloor)) continue;
+    if (dropExtra("levy", 1)) continue;
+    const rest = (Object.keys(raw) as UnitKind[]).find((kind) => (raw[kind] ?? 0) > 0);
+    if (!rest) break;
+    decCount(raw, rest);
+  }
+  const pad: UnitKind[] = waveNumber >= 4 ? ["levy", "raider"] : ["levy"];
+  guard = 0;
+  let padAt = 0;
+  while (sumCounts(raw) < target && guard++ < 400) {
+    const kind = pad[padAt % pad.length]!;
+    padAt++;
+    raw[kind] = (raw[kind] ?? 0) + 1;
+  }
+  if (waveNumber >= 3 && waveNumber <= 5 && (raw.archer ?? 0) === 0 && (raw.levy ?? 0) >= 3 && target >= 3) {
+    decCount(raw, "levy");
+    raw.archer = 1;
+  }
+  if (waveNumber >= 4 && (raw.raider ?? 0) === 0 && (raw.levy ?? 0) >= 2) {
+    decCount(raw, "levy");
+    raw.raider = 1;
+  }
+}
+
+/**
+ * Hard reads a later doctrine, forces elites and siege in early, then thickens
+ * archers, wards, brutes, templars, and trebuchets. Endless pressure starts
+ * at wave 7 instead of wave 13. Per-lane size stays under the endless lag cap.
+ */
+function hardSourceWave(waveNumber: number): number {
+  return Math.min(56, Math.max(waveNumber + 3, Math.round(waveNumber * 1.65) + 1));
+}
+
+const HARD_MULT: Partial<Record<UnitKind, number>> = {
+  archer: 1.6,
+  ward: 1.7,
+  brute: 1.55,
+  templar: 1.6,
+  trebuchet: 1.5,
+  rammer: 1.45,
+  runner: 1.25,
+  soldier: 1.15,
+  raider: 1.1,
+  levy: 1,
+};
+
+function scaledFloor(kind: UnitKind, oneLane: number, laneCount: number): number {
+  const spec: Partial<Record<UnitKind, number>> = { [kind]: oneLane };
+  return scaleCountsForLanes(spec, laneCount)[kind] ?? oneLane;
+}
+
+function seedHardRoster(raw: Partial<Record<UnitKind, number>>, waveNumber: number, laneCount: number) {
+  const bump = (kind: UnitKind, oneLane: number) => {
+    raw[kind] = Math.max(raw[kind] ?? 0, scaledFloor(kind, oneLane, laneCount));
+  };
+  if (waveNumber >= 2) bump("archer", 3);
+  if (waveNumber >= 3) {
+    bump("ward", 2);
+    bump("brute", 1);
+  }
+  if (waveNumber >= 4) {
+    bump("templar", 1);
+    bump("rammer", 1);
+  }
+  if (waveNumber >= 5) bump("trebuchet", 1);
+  if (waveNumber >= 7) {
+    bump("trebuchet", 2);
+    bump("templar", 2);
+    bump("brute", 2);
+    bump("archer", 5);
+    bump("ward", 3);
+  }
+}
+
+function planHardWave(waveNumber: number, laneCount: number): WavePlan {
+  const n = Math.max(1, Math.floor(waveNumber));
+  const normal = planNormalWave(n, laneCount);
+  const source = planNormalWave(hardSourceWave(n), laneCount);
+  const raw = copyCounts(source.counts);
+  seedHardRoster(raw, n, laneCount);
+  for (const kind of Object.keys(raw) as UnitKind[]) {
+    const next = Math.round((raw[kind] ?? 0) * (HARD_MULT[kind] ?? 1));
+    if (next > 0) raw[kind] = next;
+    else delete raw[kind];
+  }
+  for (const kind of Object.keys(raw) as UnitKind[]) {
+    const cap = ROLE_LANE_CAPS[kind];
+    if (cap !== undefined && (raw[kind] ?? 0) > cap) raw[kind] = cap;
+  }
+
+  const normalTotal = normal.roster.length;
+  const floorTotal = Math.min(
+    MAX_ENDLESS_LANE_UNITS,
+    Math.max(normalTotal + 2, Math.ceil(normalTotal * 1.65)),
+  );
+  const ceilTotal = Math.min(
+    MAX_ENDLESS_LANE_UNITS,
+    Math.max(floorTotal, Math.ceil(normalTotal * 2.2)),
+  );
+  fitRoster(
+    raw,
+    floorTotal,
+    ceilTotal,
+    ["levy", "raider", "soldier", "runner", "archer", "ward", "brute", "rammer", "templar", "trebuchet"],
+    ["archer", "ward", "brute", "templar", "trebuchet", "rammer", "runner", "soldier", "raider", "levy"],
+  );
+  return buildWavePlan(n, themeFromCounts(raw), raw);
+}
+
+function copyCounts(counts: Partial<Record<UnitKind, number>>): Partial<Record<UnitKind, number>> {
+  const out: Partial<Record<UnitKind, number>> = {};
+  for (const [kind, count] of Object.entries(counts) as [UnitKind, number][]) {
+    if (count > 0) out[kind] = count;
+  }
+  return out;
+}
+
+function sumCounts(counts: Partial<Record<UnitKind, number>>): number {
+  let total = 0;
+  for (const count of Object.values(counts)) total += count ?? 0;
+  return total;
+}
+
+function decCount(raw: Partial<Record<UnitKind, number>>, kind: UnitKind) {
+  const next = (raw[kind] ?? 0) - 1;
+  if (next <= 0) delete raw[kind];
+  else raw[kind] = next;
+}
+
+/** Trim toward `max`, then pad toward `min`. Callers keep min <= max. */
+function fitRoster(
+  raw: Partial<Record<UnitKind, number>>,
+  min: number,
+  max: number,
+  dropOrder: readonly UnitKind[],
+  padOrder: readonly UnitKind[],
+) {
+  let guard = 0;
+  while (sumCounts(raw) > max && guard++ < 600) {
+    let cut = false;
+    for (const kind of dropOrder) {
+      if ((raw[kind] ?? 0) <= 0) continue;
+      decCount(raw, kind);
+      cut = true;
+      break;
+    }
+    if (cut) continue;
+    const rest = (Object.keys(raw) as UnitKind[]).find((kind) => (raw[kind] ?? 0) > 0);
+    if (!rest) break;
+    decCount(raw, rest);
+  }
+  guard = 0;
+  let padAt = 0;
+  while (sumCounts(raw) < min && sumCounts(raw) < MAX_ENDLESS_LANE_UNITS && guard++ < 600) {
+    let placed = false;
+    for (let tries = 0; tries < padOrder.length; tries++) {
+      const kind = padOrder[(padAt + tries) % padOrder.length]!;
+      const cap = ROLE_LANE_CAPS[kind];
+      if (cap !== undefined && (raw[kind] ?? 0) >= cap) continue;
+      raw[kind] = (raw[kind] ?? 0) + 1;
+      padAt = (padAt + tries + 1) % padOrder.length;
+      placed = true;
+      break;
+    }
+    if (!placed) break;
+  }
+}
+
+function themeFromCounts(counts: Partial<Record<UnitKind, number>>): string {
+  const treb = counts.trebuchet ?? 0;
+  const ram = counts.rammer ?? 0;
+  const templar = counts.templar ?? 0;
+  const brute = counts.brute ?? 0;
+  const ward = counts.ward ?? 0;
+  const archer = counts.archer ?? 0;
+  const skirmish = (counts.raider ?? 0) + (counts.runner ?? 0);
+  const levy = counts.levy ?? 0;
+  if (treb > 0 && (ram > 0 || templar > 0 || brute > 0)) return "Royal Siege Host";
+  if (treb > 0) return "Trebuchet Battery";
+  if (templar > 0 && (brute > 0 || ram > 0)) return "Grand Combined Arms";
+  if (ram >= 2 || (ram > 0 && brute > 0)) return "Heavy Siege Push";
+  if (ram > 0) return "Battering Column";
+  if (templar > 0) return "Templar Vanguard";
+  if (brute > 0) return "Brute Shockwave";
+  if (ward > 0) return "Shield & Bow";
+  if (skirmish > 0) return "Skirmish Raiders";
+  if (archer > 0 && levy > 0 && archer > levy) return "Archer Volley";
+  if (archer > 0 && levy > 0) return "Levy & Archer";
+  if (archer > 0) return "Archer Volley";
+  return "Levy Militia";
 }
