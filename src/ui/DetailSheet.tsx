@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { BASE_ARMY_CAP, CHURCH_ARMY_POP, HOUSE_POP, MID_HOUSE_ARMY_POP, TEMPLAR_TRAIN_TIME } from "../game/balance";
+import { BASE_ARMY_CAP, CHURCH_ARMY_POP, HOUSE_POP, MID_HOUSE_ARMY_POP } from "../game/balance";
 import { isEnemyStructure } from "../game/ownership";
 import { buildingName } from "../game/sim";
 import type { BuildingKind, KeepTrainKind, TrainKind, UiSnapshot, UnitKind } from "../game/types";
@@ -234,15 +234,13 @@ export function DetailSheet({
             className={`train-opt${ui.canTrainPeon && canPay ? " afford" : ""}`}
             disabled={!ui.canTrainPeon || !canPay}
             onClick={onEnqueuePeon}
+            title={ui.canTrainPeon ? undefined : "Pop cap reached — build a House"}
           >
             <strong>Train Peon</strong>
-            <small>{ui.canTrainPeon ? "Gather wood & gold" : "Pop cap reached — build a House"}</small>
             <em>{costLabel(ui.peonTrainCost.gold, ui.peonTrainCost.wood)}</em>
           </button>
           <button type="button" className="train-opt" onClick={onCallHome}>
             <strong>Call home</strong>
-            <small>Recall peons to the keep</small>
-            <em>—</em>
           </button>
           <button
             type="button"
@@ -251,8 +249,6 @@ export function DetailSheet({
             disabled={ui.keepGarrisoned >= ui.keepGarrisonMax}
           >
             <strong>Garrison peons</strong>
-            <small>Up to {ui.keepGarrisonMax}; occupants fire defensive arrows</small>
-            <em>🏰</em>
           </button>
           <button
             type="button"
@@ -261,8 +257,6 @@ export function DetailSheet({
             disabled={ui.keepGarrisoned === 0}
           >
             <strong>Ungarrison all</strong>
-            <small>Return occupants to work</small>
-            <em>↗</em>
           </button>
         </div>
         <div className="queue-row">
@@ -296,7 +290,6 @@ export function DetailSheet({
               onClick={onUpgradeKeep}
             >
               <strong>Upgrade keep</strong>
-              <small>Unlock raiders, brutes, and cathedrals</small>
               <em>{costLabel(ui.keepUpgradeCost.gold, ui.keepUpgradeCost.wood)}</em>
             </button>
           </div>
@@ -315,10 +308,8 @@ export function DetailSheet({
                     className={`train-opt${afford && room ? " afford" : ""}`}
                     disabled={!afford || !room}
                     onClick={() => onEnqueueKeep(opt.kind)}
-                    title={opt.blurb}
                   >
                     <strong>{opt.label}</strong>
-                    <small>{opt.blurb}</small>
                     <em>{costLabel(opt.cost, opt.woodCost)}</em>
                   </button>
                 );
@@ -420,7 +411,6 @@ export function DetailSheet({
               onClick={onEnqueueTemplar}
             >
               <strong>Templar</strong>
-              <small>Cathedral knight · {TEMPLAR_TRAIN_TIME}s</small>
               <em>{costLabel(ui.templarTrainCost.gold, ui.templarTrainCost.wood)}</em>
             </button>
           </div>
@@ -500,10 +490,9 @@ export function DetailSheet({
                   className={`train-opt${opt.unlocked ? "" : " locked"}${opt.unlocked && afford && room ? " afford" : ""}`}
                   disabled={!opt.unlocked || !afford || !room}
                   onClick={() => onEnqueue(opt.kind)}
-                  title={opt.unlocked ? opt.blurb : opt.lockHint}
+                  title={opt.unlocked ? undefined : opt.lockHint}
                 >
                   <strong>{opt.label}</strong>
-                  <small>{opt.unlocked ? opt.blurb : opt.lockHint}</small>
                   <em>{costLabel(opt.cost, opt.woodCost)}</em>
                 </button>
               );
