@@ -263,6 +263,12 @@ button:disabled {
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
+  /* Left selection column. Width is a share of the stage so the center stays open. */
+  --sheet-w: min(300px, 40%);
+  --sheet-top: 8px;
+  --sheet-gap: 8px;
+  /* Keep health badge + army strength row sit on the bottom edge (~80px). */
+  --sheet-bottom-clear: 104px;
 }
 
 .battlefield {
@@ -837,6 +843,10 @@ button:disabled {
   bottom: 88px;
 }
 
+.stage:has(.keep-tug-stack) .cam-hint {
+  bottom: 104px;
+}
+
 .stage:has(.keep-tug-stack) .control-cluster {
   bottom: 88px;
 }
@@ -1004,10 +1014,21 @@ button:disabled {
 }
 
 .stage.sheet-open .hint-toast {
+  left: calc(var(--sheet-w) + 16px);
+  right: auto;
   bottom: auto;
   top: 12px;
-  right: auto;
-  max-width: min(420px, calc(100% - 150px));
+  max-width: min(380px, calc(100% - var(--sheet-w) - 200px));
+}
+
+.stage.sheet-open .cam-hint {
+  left: calc(var(--sheet-w) + 16px);
+  max-width: min(460px, calc(100% - var(--sheet-w) - 28px));
+}
+
+.stage.sheet-open .mode-banner {
+  left: calc(50% + var(--sheet-w) / 2);
+  max-width: calc(100% - var(--sheet-w) - 24px);
 }
 
 /* ------------------------------------------------------------------ radial long-press menu */
@@ -1464,13 +1485,13 @@ button:disabled {
 }
 
 .build-btn {
-  min-height: 76px;
+  min-height: 46px;
   display: grid;
   grid-template-columns: 36px 1fr auto;
   align-items: center;
   gap: 8px;
   text-align: left;
-  padding: 10px 12px;
+  padding: 8px 12px;
 }
 
 .build-btn.selected {
@@ -1692,59 +1713,150 @@ button:disabled {
 }
 
 /* ------------------------------------------------------------------ detail sheet */
+/* Building, keep, and army controllers sit in a left column, above the keep/army bars. */
 
 .sheet-dock {
   position: absolute;
-  left: 10px;
-  right: 10px;
-  bottom: 12px;
-  z-index: 10;
+  left: var(--sheet-gap);
+  top: var(--sheet-top);
+  bottom: var(--sheet-bottom-clear);
+  width: var(--sheet-w);
+  z-index: 11;
   display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  gap: 10px;
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: stretch;
   pointer-events: none;
+  overflow: hidden;
 }
 
 .sheet-slot {
-  flex: 1 1 560px;
-  max-width: 560px;
+  flex: 1 1 auto;
+  width: 100%;
   min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
   pointer-events: none;
+  overflow: hidden;
+  container-type: size;
+  container-name: sheetslot;
+}
+
+.field-site {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: hidden;
+  padding: 8px;
+}
+
+.field-site .detail-title {
+  margin: 0;
+}
+
+.field-choices {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  overflow: visible;
+}
+
+.field-site .train-opt {
+  min-height: 34px;
+  padding: 4px 6px;
+  margin: 0;
+}
+
+.field-free {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  color: #d7c7a4;
+  font-size: 12px;
+}
+
+.field-rally {
+  align-self: stretch;
+  min-height: 32px;
+  border-radius: 8px;
+  border: 1px solid #6d5a3e;
+  background: #241c16;
+  color: #f3e6c8;
+  font-weight: 700;
+}
+
+.field-rally.on {
+  border-color: #e2b15a;
+  background: #3a2c16;
+  color: #ffe7ad;
+}
+
+.field-buff {
+  margin: 0;
+  color: #cbb892;
+  font-size: 12px;
+  line-height: 1.3;
 }
 
 .sheet-dock .sheet-float {
   position: relative;
   left: auto;
   right: auto;
+  top: auto;
   bottom: auto;
   width: 100%;
   max-width: none;
-  max-height: 52vh;
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 100cqh;
   margin: 0;
   pointer-events: auto;
 }
 
+.sheet-dock .sheet-float:not(.collapsed) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sheet-dock .sheet-float:not(.collapsed) .detail-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.page.is-phone .stage {
+  --sheet-w: min(236px, 42%);
+  --sheet-top: 6px;
+  --sheet-gap: 6px;
+  --sheet-bottom-clear: calc(88px + var(--sab));
+}
+
 .layout-side.is-phone .sheet-dock {
-  left: 8px;
-  right: 8px;
-  bottom: 12px;
-  flex-direction: row;
-  align-items: flex-end;
-  justify-content: center;
+  left: var(--sheet-gap);
+  right: auto;
+  top: var(--sheet-top);
+  bottom: var(--sheet-bottom-clear);
+  width: var(--sheet-w);
 }
 
 .layout-side.is-phone .sheet-slot {
-  height: auto;
-  max-height: none;
-  max-width: 560px;
+  height: 100%;
+  max-height: 100%;
+  max-width: none;
 }
 
 .layout-side.is-phone .sheet-dock .sheet-float {
   left: auto;
   right: auto;
   bottom: auto;
-  max-height: 46vh;
+  max-height: 100%;
 }
 
 .layout-side.is-phone .work-call {
@@ -1796,24 +1908,24 @@ button:disabled {
 }
 
 .sheet-float {
-  position: absolute;
-  left: 10px;
-  right: 10px;
-  bottom: 12px;
+  position: relative;
   z-index: 10;
   pointer-events: auto;
-  max-height: 58%;
+  max-height: 100%;
+  overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
+  scrollbar-width: thin;
   background: linear-gradient(180deg, rgba(22, 18, 28, 0.96), rgba(12, 10, 16, 0.98));
   border: 1px solid #5a4a38;
   border-radius: 14px;
-  padding: 12px;
+  padding: 8px;
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.55);
   backdrop-filter: blur(6px);
   touch-action: pan-y;
-  max-width: 560px;
-  margin: 0 auto;
+  width: 100%;
+  max-width: none;
+  margin: 0;
 }
 
 .sheet-float.collapsed {
@@ -1972,24 +2084,232 @@ button:disabled {
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
 }
 
-.is-phone .sheet-float {
-  max-height: 64%;
-}
-
+.is-phone .sheet-float,
 .layout-side.is-phone .sheet-float {
-  left: 8px;
-  right: 8px;
-  bottom: 8px;
-  padding: 8px;
-  max-height: 86%;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  padding: 6px;
+  max-height: 100%;
 }
 
 .layout-side.is-phone .detail-title {
-  font-size: 16px;
+  font-size: 15px;
 }
 
-.layout-side.is-phone .train-options {
-  grid-template-columns: repeat(4, 1fr);
+.layout-side.is-phone .sheet-dock .train-options {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* Left column: tighter rows so train / upgrade / command buttons fit without scrolling. */
+.sheet-dock .detail-head {
+  margin-bottom: 4px;
+  gap: 6px;
+}
+
+.sheet-dock .detail-title {
+  font-size: 16px;
+  line-height: 1.15;
+}
+
+.sheet-dock .detail-sub {
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.sheet-dock .detail-head-actions .ghost {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 2px 7px;
+}
+
+.sheet-dock .detail-note {
+  margin: 0 0 4px;
+  font-size: 11px;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  overflow: hidden;
+}
+
+.sheet-dock .train-options {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 3px;
+  margin: 4px 0;
+}
+
+.sheet-dock .train-opt {
+  min-width: 0;
+  min-height: 0;
+  padding: 3px 6px;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.sheet-dock .train-opt strong {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1.15;
+}
+
+.sheet-dock .train-opt small {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.sheet-dock .train-opt em {
+  font-size: 11px;
+  line-height: 1.15;
+}
+
+.sheet-dock .queue-row {
+  margin: 4px 0;
+}
+
+.sheet-dock .queue-slots {
+  min-height: 0;
+  margin-top: 2px;
+}
+
+.sheet-dock .queue-chip {
+  padding: 3px 6px;
+}
+
+.sheet-dock .rank-row {
+  margin-top: 3px;
+  font-size: 12px;
+}
+
+.sheet-dock .detail-actions {
+  margin-top: 4px;
+  gap: 4px;
+  grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
+}
+
+.sheet-dock .detail-actions button {
+  min-height: 36px;
+  min-width: 0;
+  padding: 4px 4px;
+  font-size: 12px;
+  line-height: 1.15;
+}
+
+.sheet-dock .cta {
+  margin-top: 4px;
+  padding: 8px 10px;
+  font-size: 14px;
+}
+
+.sheet-dock .army-groups {
+  margin-bottom: 4px;
+}
+
+.sheet-dock .army-cmd {
+  min-height: 32px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+
+.sheet-dock .army-tip {
+  font-size: 10px;
+  line-height: 1.3;
+}
+
+.sheet-dock .raze-confirm {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  z-index: 5;
+  margin-top: 0;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.6);
+}
+
+.page.is-phone .sheet-dock .raze-confirm {
+  left: 6px;
+  right: 6px;
+  bottom: 6px;
+}
+
+.sheet-dock .detail-body:not(:has(.raze-confirm)) .detail-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  margin-left: -8px;
+  margin-right: -8px;
+  padding: 4px 8px 0;
+  background: #14110e;
+}
+
+.page.is-phone .sheet-dock .detail-body:not(:has(.raze-confirm)) .detail-actions {
+  margin-left: -6px;
+  margin-right: -6px;
+  padding-left: 6px;
+  padding-right: 6px;
+}
+
+@media (max-height: 560px) {
+  .sheet-dock .detail-note,
+  .sheet-dock .army-tip {
+    display: none;
+  }
+
+  .sheet-dock .train-options,
+  .layout-side.is-phone .sheet-dock .train-options {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .sheet-dock .train-opt small {
+    display: none;
+  }
+
+  .sheet-dock .train-opt {
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 0;
+    padding: 2px 6px;
+  }
+
+  .sheet-dock .train-opt strong {
+    flex: none;
+    max-width: 100%;
+  }
+
+  .sheet-dock .train-opt em {
+    flex: none;
+    font-size: 10px;
+  }
+
+  .sheet-dock .detail-title {
+    font-size: 14px;
+  }
+
+  .sheet-dock .detail-head {
+    margin-bottom: 2px;
+  }
+
+  .sheet-dock .detail-actions {
+    margin-top: 4px;
+  }
+
+  .sheet-dock .detail-actions button {
+    min-height: 32px;
+  }
+
+  .sheet-dock .rank-row {
+    margin-top: 2px;
+  }
 }
 
 /* ------------------------------------------------------------------ overlays */
@@ -2065,12 +2385,12 @@ button:disabled {
   z-index: 7;
 }
 
-.stage.sheet-open .toasts {
-  right: 76px;
-}
-
+.stage.sheet-open .toasts,
 .stage.possessed.sheet-open .toasts {
-  right: auto;
+  left: calc(var(--sheet-w) + 14px);
+  right: min(190px, 30%);
+  margin: 0;
+  max-width: min(320px, calc(100% - var(--sheet-w) - 210px));
 }
 
 .toast {
@@ -2251,13 +2571,26 @@ button:disabled {
 
 .train-opt {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  min-height: 58px;
-  padding: 8px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 32px;
+  padding: 4px 8px;
   text-align: left;
   font-size: 13px;
+}
+
+.train-opt strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.train-opt em {
+  flex: none;
+  white-space: nowrap;
 }
 
 
@@ -2742,8 +3075,8 @@ button,
 }
 
 .layout-side .build-btn {
-  min-height: 64px;
-  padding: 8px;
+  min-height: 44px;
+  padding: 6px 8px;
   gap: 6px;
 }
 
@@ -2757,7 +3090,7 @@ button,
 .build-wrap.compact .build-btn {
   width: auto;
   flex: none;
-  min-height: 74px;
+  min-height: 56px;
   border-radius: 0;
   align-items: flex-start;
   padding: 8px 10px;
