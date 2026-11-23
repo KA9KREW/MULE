@@ -186,6 +186,22 @@ export interface Unit {
    * The count stays across leaving and re-entering the body, and clears when the soldier dies.
    */
   fieldKills?: number;
+  /**
+   * Stance for escorts guarding this leader. One value for the whole rally.
+   * Absent means Follow.
+   */
+  rallyStance?: RallyStance;
+}
+
+/** How a guard rally fights while it stays with its leader. */
+export type RallyStance = "follow" | "defensive" | "stand" | "aggressive";
+
+export interface RallyUi {
+  leaderId: number;
+  leaderLabel: string;
+  stance: RallyStance;
+  /** Another rally is also on the field, so the control names this leader. */
+  several: boolean;
 }
 
 /** First-person body the local player is driving, or none. */
@@ -721,6 +737,8 @@ export interface UiSnapshot {
   fieldSite: FieldSiteUi | null;
   /** Human + CPU assistant for this keep. Null for a human keep, a pure CPU keep, and observers. */
   partner: PartnerUi | null;
+  /** Guard rally the local player can set a stance on. Null when nobody is escorting a leader. */
+  rally: RallyUi | null;
   /** This keep's exchange prices. */
   marketQuotes: MarketQuotes;
   /** Purple midfield house can still be raised into a market. */

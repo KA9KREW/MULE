@@ -205,7 +205,7 @@ export function DetailSheet({
             </div>
 
             <p className="army-tip">
-              Right-click ground to form up · ally to guard &amp; follow · foe/tower to focus-fire · Dbl-click picks same type
+              Right-click ground moves a free squad · ally to guard &amp; follow · a rally right-click sends trebuchets only
             </p>
           </div>
         )}

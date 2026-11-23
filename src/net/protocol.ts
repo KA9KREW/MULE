@@ -15,6 +15,7 @@ import type {
   Team,
   SiegePhase,
   TrainKind,
+  RallyStance,
   UnitKind,
   Villager,
   WavePhase,
@@ -74,6 +75,16 @@ export type RemoteOrder =
   | { t: "unitAttackBarricade"; team: Team; ids: number[]; barricadeId: number }
   | { t: "unitAttackKeep"; team: Team; ids: number[] }
   | { t: "unitGuard"; team: Team; ids: number[]; guardId: number }
+  /** Right-click while a rally is selected: those trebuchets focus-fire, and the rest keep guarding. */
+  | {
+      t: "unitRallyAttack";
+      team: Team;
+      ids: number[];
+      target: "unit" | "building" | "barricade" | "keep";
+      targetId?: number;
+    }
+  /** One stance for every escort guarding this leader. */
+  | { t: "rallyStance"; team: Team; leaderId: number; stance: RallyStance }
   | { t: "unitPatrol"; team: Team; ids: number[]; x: number; y: number }
   | { t: "unitHold"; team: Team; ids: number[]; hold: boolean }
   | { t: "unitStop"; team: Team; ids: number[] }
@@ -136,6 +147,8 @@ export interface SnapUnit {
   manualOrder?: boolean;
   /** Kills scored while a human was driving this body. Absent means zero. */
   fieldKills?: number;
+  /** Absent means Follow. Escorts read this from their leader. */
+  rallyStance?: RallyStance;
 }
 
 export interface SnapVillager {
@@ -373,6 +386,8 @@ const ORDER_TYPES = new Set<RemoteOrder["t"]>([
   "unitAttackBarricade",
   "unitAttackKeep",
   "unitGuard",
+  "unitRallyAttack",
+  "rallyStance",
   "unitPatrol",
   "unitHold",
   "unitStop",

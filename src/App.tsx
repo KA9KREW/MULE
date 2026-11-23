@@ -15,6 +15,7 @@ import { BuildBar } from "./ui/BuildBar";
 import { DetailSheet } from "./ui/DetailSheet";
 import { FieldSitePanel } from "./ui/FieldSitePanel";
 import { PartnerBox } from "./ui/PartnerBox";
+import { RallyStanceBar } from "./ui/RallyStanceBar";
 import { KeepTugBar } from "./ui/KeepTugBar";
 import { Overlays } from "./ui/Overlays";
 import { CampaignMap } from "./ui/CampaignMap";
@@ -138,6 +139,7 @@ const defaultUi: UiSnapshot = {
   possessed: null,
   fieldSite: null,
   partner: null,
+  rally: null,
   marketQuotes: { woodBuy: 100, woodSell: 70, goldBuy: 100, goldSell: 70 },
   selectedCanRaiseMarket: false,
   defendLayer: null,
@@ -489,56 +491,63 @@ export default function App() {
       let markerKind: TapMarker["kind"] = "move";
       let markerLabel = "Move";
       let soundFreq = 370;
+      let ordered = false;
 
       if (targetHit?.kind === "unit") {
         const u = state.units.find((unit) => unit.id === Number(targetHit.id) && unit.hp > 0);
         if (u && u.team === localTeam) {
           if (sim.commandSelectedUnitsGuard(u.id)) {
+            ordered = true;
             markerKind = "patrol";
             markerLabel = "Guard";
             soundFreq = 440;
           } else {
-            sim.commandSelectedUnitsMove(world);
+            ordered = sim.commandSelectedUnitsMove(world);
           }
         } else if (u && u.team !== localTeam) {
-          sim.commandSelectedUnitsAttackUnit(u.id);
+          ordered = sim.commandSelectedUnitsAttackUnit(u.id);
           markerKind = "attack";
           markerLabel = "Attack";
           soundFreq = 480;
         } else {
-          sim.commandSelectedUnitsMove(world);
+          ordered = sim.commandSelectedUnitsMove(world);
         }
       } else if (targetHit?.kind === "building") {
         const b = state.buildings.find((bld) => bld.id === Number(targetHit.id) && bld.hp > 0);
         if (b && b.team !== localTeam) {
-          sim.commandSelectedUnitsAttackBuilding(b.id);
+          ordered = sim.commandSelectedUnitsAttackBuilding(b.id);
           markerKind = "attack";
           markerLabel = "Attack";
           soundFreq = 480;
         } else {
-          sim.commandSelectedUnitsMove(world);
+          ordered = sim.commandSelectedUnitsMove(world);
         }
       } else if (targetHit?.kind === "barricade") {
         const bar = state.barricades.find((br) => br.id === Number(targetHit.id) && br.hp > 0);
         if (bar && bar.team !== localTeam) {
-          sim.commandSelectedUnitsAttackBarricade(bar.id);
+          ordered = sim.commandSelectedUnitsAttackBarricade(bar.id);
           markerKind = "attack";
           markerLabel = "Attack";
           soundFreq = 480;
         } else {
-          sim.commandSelectedUnitsMove(world);
+          ordered = sim.commandSelectedUnitsMove(world);
         }
       } else if (targetHit?.kind === "keep") {
         if (targetHit.id !== localTeam) {
-          sim.commandSelectedUnitsAttackKeep();
+          ordered = sim.commandSelectedUnitsAttackKeep();
           markerKind = "attack";
           markerLabel = "Attack";
           soundFreq = 480;
         } else {
-          sim.commandSelectedUnitsMove(world);
+          ordered = sim.commandSelectedUnitsMove(world);
         }
       } else {
-        sim.commandSelectedUnitsMove(world);
+        ordered = sim.commandSelectedUnitsMove(world);
+      }
+
+      if (!ordered) {
+        refreshUi();
+        return;
       }
 
       pushTapMarker(localX, localY, markerKind, markerLabel);
@@ -2330,10 +2339,21 @@ export default function App() {
             </p>
           )}
           <div className="sheet-dock">
+            {!spectating && ui.rally && (
+              <RallyStanceBar
+                rally={ui.rally}
+                keys={!!ui.possessed && !ui.fieldSite}
+                onStance={(stance) => {
+                  sim.setRallyStance(ui.rally!.leaderId, stance);
+                  refreshUi();
+                  beep(420, 0.04);
+                }}
+              />
+            )}
             {!spectating && ui.partner && (
               <PartnerBox
                 partner={ui.partner}
-                keys={!!ui.possessed && !ui.fieldSite}
+                keys={!!ui.possessed && !ui.fieldSite && !ui.rally}
                 onMode={(mode) => {
                   sim.setPartnerMode(mode);
                   refreshUi();

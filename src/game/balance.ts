@@ -343,6 +343,8 @@ export const BUILD_HP: Record<BuildingKind, number> = {
 
 /** Beats every player-built tower (ballista 178 is the longest). The starter watchtower's 220 still reaches it. */
 export const TREBUCHET_RANGE = 190;
+/** Aggressive rally escorts raid this close to their leader, then stop. One and a half trebuchet ranges. */
+export const RALLY_AGGRESSIVE_LEASH = TREBUCHET_RANGE * 1.5;
 export const TREBUCHET_UNPACK = 2.55;
 export const TREBUCHET_PACK = 1.55;
 /** Shots needed to knock down a full-HP legal building (or barricade / rival engine). */

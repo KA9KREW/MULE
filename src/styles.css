@@ -1867,6 +1867,48 @@ button:disabled {
   gap: 6px;
 }
 
+.sheet-dock .rally-stance {
+  flex: 0 0 auto;
+  max-height: none;
+  overflow: visible;
+  padding: 6px;
+  gap: 4px;
+}
+
+.rally-stance-who {
+  color: #cbb892;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  line-height: 1.2;
+}
+
+.rally-stance-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.rally-stance-btn {
+  flex: 1 1 46%;
+  min-height: 28px;
+  padding: 4px 6px;
+  border: 1px solid #6e6254;
+  background: #2a241c;
+  color: #efe4d0;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.rally-stance-btn.on {
+  border-color: #e2b15a;
+  background: #3a2c16;
+  color: #ffe7ad;
+}
+
+.rally-stance-btn.field-focus {
+  box-shadow: inset 0 0 0 2px #ffe7ad;
+}
+
 .sheet-dock:has(.partner-box) .sheet-slot {
   height: auto;
   flex: 1 1 0;

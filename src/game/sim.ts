@@ -85,6 +85,7 @@ import {
   TREBUCHET_PACK,
   TREBUCHET_RANGE,
   TREBUCHET_UNPACK,
+  RALLY_AGGRESSIVE_LEASH,
   templarRallyRadius,
   TRAIN_ORDER,
   UNIT_DEFS,
@@ -196,6 +197,8 @@ import type {
   Lane,
   MapDef,
   Pad,
+  RallyStance,
+  RallyUi,
   RectHit,
   ResourceNode,
   SelectedArmyUi,
@@ -1217,6 +1220,15 @@ export class GameSim {
     if (order.t === "unitAttackKeep") {
       const keep = this.teamKeep(this.enemy(team));
       this.state.commandMarkers.push({ id: this.next(), kind: "attack", pos: { ...keep.pos }, life: 1.1 });
+      return;
+    }
+    if (order.t === "unitRallyAttack") {
+      const pos = this.attackMarkerPos(team, order.target, order.targetId);
+      if (pos) this.state.commandMarkers.push({ id: this.next(), kind: "attack", pos, life: 1.1 });
+      return;
+    }
+    if (order.t === "rallyStance") {
+      this.applyRallyStance(team, order.leaderId, order.stance);
     }
   }
 
@@ -2372,7 +2384,10 @@ export class GameSim {
     const team = this.localTeam;
     const squad = this.selectedSquad(team, this.state.selectedUnitIds);
     if (squad.length === 0) return false;
-    const ids = squad.map((u) => u.id);
+    // Escorts stay on their leader. A ground click still moves anyone who is not in the rally.
+    const movers = squad.filter((u) => !this.unitIsRallyEscort(u));
+    if (movers.length === 0) return false;
+    const ids = movers.map((u) => u.id);
     if (this.redirect({ t: "unitMove", team, ids, x: pos.x, y: pos.y })) return true;
     return this.applyUnitMove(team, ids, pos);
   }
@@ -2394,6 +2409,15 @@ export class GameSim {
     if (squad.length === 0) return false;
     const target = this.state.units.find((u) => u.id === targetId && u.team !== team && u.hp > 0);
     if (!target) return false;
+    const rally = this.rallyTrebAttackIds(team, squad);
+    if (rally) {
+      if (rally.length === 0) {
+        this.tell(team, "No trebuchet in the rally.");
+        return false;
+      }
+      if (this.redirect({ t: "unitRallyAttack", team, ids: rally, target: "unit", targetId })) return true;
+      return this.applyRallyTrebAttack(team, rally, "unit", targetId);
+    }
     const ids = squad.map((u) => u.id);
     if (this.redirect({ t: "unitAttackUnit", team, ids, targetId })) return true;
     return this.applyUnitAttackUnit(team, ids, targetId);
@@ -2405,6 +2429,15 @@ export class GameSim {
     if (squad.length === 0) return false;
     const b = this.state.buildings.find((x) => x.id === buildingId && x.team !== team && x.hp > 0);
     if (!b) return false;
+    const rally = this.rallyTrebAttackIds(team, squad);
+    if (rally) {
+      if (rally.length === 0) {
+        this.tell(team, "No trebuchet in the rally.");
+        return false;
+      }
+      if (this.redirect({ t: "unitRallyAttack", team, ids: rally, target: "building", targetId: buildingId })) return true;
+      return this.applyRallyTrebAttack(team, rally, "building", buildingId);
+    }
     const ids = squad.map((u) => u.id);
     if (this.redirect({ t: "unitAttackBuilding", team, ids, buildingId })) return true;
     return this.applyUnitAttackBuilding(team, ids, buildingId);
@@ -2416,6 +2449,16 @@ export class GameSim {
     if (squad.length === 0) return false;
     const bar = this.state.barricades.find((x) => x.id === barricadeId && x.team !== team && x.hp > 0);
     if (!bar) return false;
+    const rally = this.rallyTrebAttackIds(team, squad);
+    if (rally) {
+      if (rally.length === 0) {
+        this.tell(team, "No trebuchet in the rally.");
+        return false;
+      }
+      if (this.redirect({ t: "unitRallyAttack", team, ids: rally, target: "barricade", targetId: barricadeId }))
+        return true;
+      return this.applyRallyTrebAttack(team, rally, "barricade", barricadeId);
+    }
     const ids = squad.map((u) => u.id);
     if (this.redirect({ t: "unitAttackBarricade", team, ids, barricadeId })) return true;
     return this.applyUnitAttackBarricade(team, ids, barricadeId);
@@ -2425,9 +2468,26 @@ export class GameSim {
     const team = this.localTeam;
     const squad = this.selectedSquad(team, this.state.selectedUnitIds);
     if (squad.length === 0) return false;
+    const rally = this.rallyTrebAttackIds(team, squad);
+    if (rally) {
+      if (rally.length === 0) {
+        this.tell(team, "No trebuchet in the rally.");
+        return false;
+      }
+      if (this.redirect({ t: "unitRallyAttack", team, ids: rally, target: "keep" })) return true;
+      return this.applyRallyTrebAttack(team, rally, "keep");
+    }
     const ids = squad.map((u) => u.id);
     if (this.redirect({ t: "unitAttackKeep", team, ids })) return true;
     return this.applyUnitAttackKeep(team, ids);
+  }
+
+  setRallyStance(leaderId: number, stance: RallyStance): boolean {
+    if (this.observer) return false;
+    const team = this.localTeam;
+    if (stance !== "follow" && stance !== "defensive" && stance !== "stand" && stance !== "aggressive") return false;
+    if (this.redirect({ t: "rallyStance", team, leaderId, stance })) return true;
+    return this.applyRallyStance(team, leaderId, stance);
   }
 
   commandSelectedUnitsPatrol(pos: Vec2): boolean {
@@ -2690,6 +2750,118 @@ export class GameSim {
     if (!silent) {
       this.tell(team, "Units released to auto.");
     }
+    return true;
+  }
+
+  private unitIsRallyEscort(u: Unit): boolean {
+    if (u.guardUnitId == null) return false;
+    return this.state.units.some((x) => x.id === u.guardUnitId && x.team === u.team && x.hp > 0);
+  }
+
+  /** Living escorts per leader on this team. Human-owned troops sent elsewhere are not in this map. */
+  private escortCounts(team: Team): Map<number, number> {
+    const counts = new Map<number, number>();
+    for (const u of this.state.units) {
+      if (u.team !== team || u.hp <= 0 || u.guardUnitId == null) continue;
+      counts.set(u.guardUnitId, (counts.get(u.guardUnitId) ?? 0) + 1);
+    }
+    return counts;
+  }
+
+  /**
+   * Trebuchet ids to focus-fire, or null when this selection is a normal order.
+   * An explicit trebuchet-only selection stays on today's attack.
+   * Any other selection that touches a rally orders every trebuchet guarding those leaders.
+   */
+  private rallyTrebAttackIds(team: Team, squad: Unit[]): number[] | null {
+    if (squad.length === 0 || squad.every((u) => u.kind === "trebuchet")) return null;
+    const counts = this.escortCounts(team);
+    const leaders = new Set<number>();
+    for (const u of squad) {
+      if (u.guardUnitId != null && (counts.get(u.guardUnitId) ?? 0) > 0) leaders.add(u.guardUnitId);
+      if ((counts.get(u.id) ?? 0) > 0) leaders.add(u.id);
+    }
+    if (leaders.size === 0) return null;
+    const ids: number[] = [];
+    for (const u of this.state.units) {
+      if (u.team !== team || u.hp <= 0 || u.kind !== "trebuchet" || this.isPlayerDriven(u)) continue;
+      if (u.guardUnitId != null && leaders.has(u.guardUnitId)) ids.push(u.id);
+    }
+    return ids;
+  }
+
+  private attackMarkerPos(
+    team: Team,
+    target: "unit" | "building" | "barricade" | "keep",
+    targetId?: number,
+  ): Vec2 | null {
+    if (target === "keep") return { ...this.teamKeep(this.enemy(team)).pos };
+    if (targetId == null) return null;
+    if (target === "unit") {
+      const u = this.state.units.find((x) => x.id === targetId && x.team !== team && x.hp > 0);
+      return u ? { ...u.pos } : null;
+    }
+    if (target === "building") {
+      const b = this.state.buildings.find((x) => x.id === targetId && x.team !== team && x.hp > 0);
+      return b ? { ...b.pos } : null;
+    }
+    const bar = this.state.barricades.find((x) => x.id === targetId && x.team !== team && x.hp > 0);
+    return bar ? { ...bar.pos } : null;
+  }
+
+  /** Focus-fire for rally trebuchets. Guard, ownership, and the rest of the rally stay put. */
+  private applyRallyTrebAttack(
+    team: Team,
+    ids: number[],
+    target: "unit" | "building" | "barricade" | "keep",
+    targetId?: number,
+  ): boolean {
+    const pos = this.attackMarkerPos(team, target, targetId);
+    if (!pos) return false;
+    if (target !== "keep") {
+      const live =
+        target === "unit"
+          ? this.state.units.some((u) => u.id === targetId && u.team !== team && u.hp > 0)
+          : target === "building"
+            ? this.state.buildings.some((b) => b.id === targetId && b.team !== team && b.hp > 0)
+            : this.state.barricades.some((b) => b.id === targetId && b.team !== team && b.hp > 0);
+      if (!live || targetId == null) return false;
+    }
+    let ordered = 0;
+    for (const id of ids) {
+      const u = this.state.units.find((x) => x.id === id);
+      if (!u || u.team !== team || u.hp <= 0 || u.kind !== "trebuchet" || u.guardUnitId == null) continue;
+      if (this.isPlayerDriven(u)) continue;
+      u.orderTargetUnitId = undefined;
+      u.orderTargetBuildingId = undefined;
+      u.orderTargetBarricadeId = undefined;
+      u.orderTargetKeep = undefined;
+      u.targetUnitId = undefined;
+      u.engageFrom = undefined;
+      if (target === "unit") u.orderTargetUnitId = targetId;
+      else if (target === "building") u.orderTargetBuildingId = targetId;
+      else if (target === "barricade") u.orderTargetBarricadeId = targetId;
+      else u.orderTargetKeep = true;
+      ordered += 1;
+    }
+    if (ordered === 0) return false;
+    this.state.commandMarkers.push({ id: this.next(), kind: "attack", pos, life: 1.1 });
+    return true;
+  }
+
+  private rallyStanceOf(leader: Unit): RallyStance {
+    const stance = leader.rallyStance;
+    if (stance === "defensive" || stance === "stand" || stance === "aggressive") return stance;
+    return "follow";
+  }
+
+  private applyRallyStance(team: Team, leaderId: number, stance: RallyStance): boolean {
+    if (stance !== "follow" && stance !== "defensive" && stance !== "stand" && stance !== "aggressive") return false;
+    const leader = this.state.units.find((u) => u.id === leaderId && u.team === team && u.hp > 0);
+    if (!leader) return false;
+    const escorts = this.state.units.some((u) => u.team === team && u.hp > 0 && u.id !== leader.id && u.guardUnitId === leader.id);
+    if (!escorts) return false;
+    leader.rallyStance = stance === "follow" ? undefined : stance;
     return true;
   }
 
@@ -4991,6 +5163,242 @@ export class GameSim {
     return best;
   }
 
+  private livingGuardLeader(u: Unit): Unit | undefined {
+    if (u.guardUnitId == null || u.guardUnitId === u.id) return undefined;
+    return this.state.units.find((x) => x.id === u.guardUnitId && x.team === u.team && x.hp > 0);
+  }
+
+  private forgetTrebTarget(u: Unit, which: "unit" | "building" | "barricade" | "keep") {
+    if (which === "unit") u.orderTargetUnitId = undefined;
+    else if (which === "building") u.orderTargetBuildingId = undefined;
+    else if (which === "barricade") u.orderTargetBarricadeId = undefined;
+    else u.orderTargetKeep = undefined;
+    if (u.guardUnitId == null) u.rallyPoint = { ...u.pos };
+  }
+
+  /** Right-click focus. Runs before the rally stance so a marked target wins. */
+  private stepTrebuchetFocus(u: Unit, team: Team, dt: number): boolean {
+    if (
+      u.orderTargetUnitId == null &&
+      u.orderTargetBuildingId == null &&
+      u.orderTargetBarricadeId == null &&
+      !u.orderTargetKeep
+    ) {
+      return false;
+    }
+    const enemyTeam = this.enemy(team);
+    const moveTreb = (dest: Vec2) => moveTowards(u.pos, dest, u.speed, dt);
+    if (u.orderTargetUnitId != null) {
+      const target = this.state.units.find((e) => e.id === u.orderTargetUnitId && e.team === enemyTeam && e.hp > 0);
+      if (!target) this.forgetTrebTarget(u, "unit");
+      else {
+        if (dist(u.pos, target.pos) <= TREBUCHET_RANGE) {
+          this.driveSiegeStance(u, dt, false);
+          if (u.siegePhase === "ready" && u.attackTimer <= 0) {
+            this.fireTrebuchet(u, { fire: () => this.trebuchetHitUnit(u, target) });
+          }
+        } else {
+          this.driveSiegeStance(u, dt, true);
+          if (u.siegePhase === "packed") moveTreb(target.pos);
+        }
+        return true;
+      }
+    }
+    if (u.orderTargetBuildingId != null) {
+      const target = this.state.buildings.find(
+        (b) => b.id === u.orderTargetBuildingId && b.team === enemyTeam && b.hp > 0,
+      );
+      if (!target) this.forgetTrebTarget(u, "building");
+      else {
+        if (dist(u.pos, target.pos) <= TREBUCHET_RANGE) {
+          this.driveSiegeStance(u, dt, false);
+          if (u.siegePhase === "ready" && u.attackTimer <= 0) {
+            this.fireTrebuchet(u, { fire: () => this.trebuchetHitBuilding(u, target) });
+          }
+        } else {
+          this.driveSiegeStance(u, dt, true);
+          if (u.siegePhase === "packed") moveTreb(target.pos);
+        }
+        return true;
+      }
+    }
+    if (u.orderTargetBarricadeId != null) {
+      const wall = this.state.barricades.find(
+        (b) => b.id === u.orderTargetBarricadeId && b.team === enemyTeam && b.hp > 0,
+      );
+      if (!wall) this.forgetTrebTarget(u, "barricade");
+      else {
+        if (dist(u.pos, wall.pos) <= TREBUCHET_RANGE) {
+          this.driveSiegeStance(u, dt, false);
+          if (u.siegePhase === "ready" && u.attackTimer <= 0) {
+            this.fireTrebuchet(u, { fire: () => this.trebuchetHitBarricade(u, wall) });
+          }
+        } else {
+          this.driveSiegeStance(u, dt, true);
+          if (u.siegePhase === "packed") moveTreb(wall.pos);
+        }
+        return true;
+      }
+    }
+    if (u.orderTargetKeep) {
+      const keep = this.teamKeep(enemyTeam);
+      if (dist(u.pos, keep.pos) <= TREBUCHET_RANGE) {
+        this.driveSiegeStance(u, dt, false);
+        if (u.siegePhase === "ready" && u.attackTimer <= 0) {
+          this.fireTrebuchet(u, { fire: () => this.trebuchetHitKeep(u, keep) });
+        }
+      } else {
+        this.driveSiegeStance(u, dt, true);
+        if (u.siegePhase === "packed") moveTreb(keep.pos);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  private nearestEnemyUnitInRange(u: Unit, team: Team, radius: number): Unit | undefined {
+    const enemyTeam = this.enemy(team);
+    let best: Unit | undefined;
+    let bestD = radius;
+    for (const e of this.state.units) {
+      if (!this.militaryAccepts(u, e, enemyTeam, true)) continue;
+      const d = dist(u.pos, e.pos);
+      if (d <= bestD) {
+        best = e;
+        bestD = d;
+      }
+    }
+    return best;
+  }
+
+  private nearestTrebShot(
+    u: Unit,
+    team: Team,
+    radius: number,
+  ):
+    | { kind: "building"; target: Building }
+    | { kind: "barricade"; target: Barricade }
+    | { kind: "keep"; target: GameState["keeps"][Team] }
+    | null {
+    const enemyTeam = this.enemy(team);
+    let bestD = radius;
+    let best:
+      | { kind: "building"; target: Building }
+      | { kind: "barricade"; target: Barricade }
+      | { kind: "keep"; target: GameState["keeps"][Team] }
+      | null = null;
+    for (const b of this.state.buildings) {
+      if (b.team === u.team || b.hp <= 0 || !this.canTrebuchetTarget(b)) continue;
+      const d = dist(u.pos, b.pos);
+      if (d <= bestD) {
+        bestD = d;
+        best = { kind: "building", target: b };
+      }
+    }
+    for (const wall of this.state.barricades) {
+      if (!wall.built || wall.team === u.team || wall.hp <= 0) continue;
+      const d = dist(u.pos, wall.pos);
+      if (d <= bestD) {
+        bestD = d;
+        best = { kind: "barricade", target: wall };
+      }
+    }
+    const keep = this.teamKeep(enemyTeam);
+    if (keep.hp > 0) {
+      const d = dist(u.pos, keep.pos);
+      if (d <= bestD) best = { kind: "keep", target: keep };
+    }
+    return best;
+  }
+
+  private fireTrebShot(
+    u: Unit,
+    shot:
+      | { kind: "building"; target: Building }
+      | { kind: "barricade"; target: Barricade }
+      | { kind: "keep"; target: GameState["keeps"][Team] },
+  ) {
+    if (shot.kind === "building") this.trebuchetHitBuilding(u, shot.target);
+    else if (shot.kind === "barricade") this.trebuchetHitBarricade(u, shot.target);
+    else this.trebuchetHitKeep(u, shot.target);
+  }
+
+  private stepTrebuchetAggressive(
+    u: Unit,
+    leader: Unit,
+    slot: Vec2,
+    team: Team,
+    dt: number,
+    moveTreb: (dest: Vec2) => void,
+  ) {
+    if (dist(leader.pos, u.pos) > RALLY_AGGRESSIVE_LEASH) {
+      this.driveSiegeStance(u, dt, true);
+      if (u.siegePhase === "packed") moveTreb(slot);
+      return;
+    }
+    const shot = this.nearestTrebShot(u, team, TREBUCHET_RANGE);
+    if (shot) {
+      this.driveSiegeStance(u, dt, false);
+      if (u.siegePhase === "ready" && u.attackTimer <= 0) this.fireTrebShot(u, shot);
+      return;
+    }
+    const goal = this.pickAggressiveTarget(u, leader, team, true);
+    if (goal && goal.kind === "unit" && "fromBarracks" in goal.ent && dist(u.pos, goal.pos) <= TREBUCHET_RANGE) {
+      const foe = goal.ent as Unit;
+      this.driveSiegeStance(u, dt, false);
+      if (u.siegePhase === "ready" && u.attackTimer <= 0) {
+        this.fireTrebuchet(u, { fire: () => this.trebuchetHitUnit(u, foe) });
+      }
+      return;
+    }
+    if (goal && !(goal.kind === "unit" && !("fromBarracks" in goal.ent))) {
+      this.driveSiegeStance(u, dt, true);
+      if (u.siegePhase === "packed") moveTreb(goal.pos);
+      return;
+    }
+    if (dist(u.pos, slot) > 5) {
+      this.driveSiegeStance(u, dt, true);
+      if (u.siegePhase === "packed") moveTreb(slot);
+    }
+  }
+
+  /** Guarded trebuchet. Follow keeps today's in-range shots. Other stances do not wander off to buildings. */
+  private stepTrebuchetOnRally(u: Unit, leader: Unit, team: Team, dt: number) {
+    const slot = u.rallyPoint ?? leader.pos;
+    const moveTreb = (dest: Vec2) => moveTowards(u.pos, dest, u.speed, dt);
+    const stance = this.rallyStanceOf(leader);
+    if (stance === "aggressive") {
+      this.stepTrebuchetAggressive(u, leader, slot, team, dt, moveTreb);
+      return;
+    }
+    if (dist(u.pos, slot) > 34) {
+      this.driveSiegeStance(u, dt, true);
+      if (u.siegePhase === "packed") moveTreb(slot);
+      return;
+    }
+    if (stance === "follow") {
+      const aimGuard = this.pickTrebuchetAim(u);
+      if (aimGuard?.inRange) {
+        this.driveSiegeStance(u, dt, false);
+        if (u.siegePhase === "ready" && u.attackTimer <= 0) this.fireTrebuchet(u, aimGuard);
+        return;
+      }
+    } else {
+      const foe = this.nearestEnemyUnitInRange(u, team, TREBUCHET_RANGE);
+      if (foe) {
+        this.driveSiegeStance(u, dt, false);
+        if (u.siegePhase === "ready" && u.attackTimer <= 0) {
+          this.fireTrebuchet(u, { fire: () => this.trebuchetHitUnit(u, foe) });
+        }
+        return;
+      }
+    }
+    if (dist(u.pos, slot) > 5) {
+      this.driveSiegeStance(u, dt, true);
+      if (u.siegePhase === "packed") moveTreb(slot);
+    }
+  }
+
   private stepTrebuchet(u: Unit, team: Team, dt: number) {
     const enemyTeam = this.enemy(team);
     const moveTreb = (dest: Vec2) => {
@@ -4998,103 +5406,19 @@ export class GameSim {
       else this.marchSiegeOnRoad(u, team, dest, dt);
     };
 
+    if (this.stepTrebuchetFocus(u, team, dt)) return;
+    const rallyLeader = this.livingGuardLeader(u);
+    if (rallyLeader) {
+      this.stepTrebuchetOnRally(u, rallyLeader, team, dt);
+      return;
+    }
+
     if (u.fromBarracks && u.manualOrder) {
-      if (u.orderTargetUnitId != null) {
-        const target = this.state.units.find(
-          (e) => e.id === u.orderTargetUnitId && e.team === enemyTeam && e.hp > 0,
-        );
-        if (!target) {
-          u.orderTargetUnitId = undefined;
-          u.rallyPoint = { ...u.pos };
-        } else {
-          if (dist(u.pos, target.pos) <= TREBUCHET_RANGE) {
-            this.driveSiegeStance(u, dt, false);
-            if (u.siegePhase === "ready" && u.attackTimer <= 0) {
-              this.fireTrebuchet(u, { fire: () => this.trebuchetHitUnit(u, target) });
-            }
-          } else {
-            this.driveSiegeStance(u, dt, true);
-            if (u.siegePhase === "packed") moveTreb(target.pos);
-          }
-          return;
-        }
-      }
-      if (u.orderTargetBuildingId != null) {
-        const target = this.state.buildings.find(
-          (b) => b.id === u.orderTargetBuildingId && b.team === enemyTeam && b.hp > 0,
-        );
-        if (!target) {
-          u.orderTargetBuildingId = undefined;
-          u.rallyPoint = { ...u.pos };
-        } else {
-          if (dist(u.pos, target.pos) <= TREBUCHET_RANGE) {
-            this.driveSiegeStance(u, dt, false);
-            if (u.siegePhase === "ready" && u.attackTimer <= 0) {
-              this.fireTrebuchet(u, { fire: () => this.trebuchetHitBuilding(u, target) });
-            }
-          } else {
-            this.driveSiegeStance(u, dt, true);
-            if (u.siegePhase === "packed") moveTreb(target.pos);
-          }
-          return;
-        }
-      }
-      if (u.orderTargetBarricadeId != null) {
-        const wall = this.state.barricades.find(
-          (b) => b.id === u.orderTargetBarricadeId && b.team === enemyTeam && b.hp > 0,
-        );
-        if (!wall) {
-          u.orderTargetBarricadeId = undefined;
-          u.rallyPoint = { ...u.pos };
-        } else {
-          if (dist(u.pos, wall.pos) <= TREBUCHET_RANGE) {
-            this.driveSiegeStance(u, dt, false);
-            if (u.siegePhase === "ready" && u.attackTimer <= 0) {
-              this.fireTrebuchet(u, { fire: () => this.trebuchetHitBarricade(u, wall) });
-            }
-          } else {
-            this.driveSiegeStance(u, dt, true);
-            if (u.siegePhase === "packed") moveTreb(wall.pos);
-          }
-          return;
-        }
-      }
-      if (u.orderTargetKeep) {
-        const keep = this.teamKeep(enemyTeam);
-        if (dist(u.pos, keep.pos) <= TREBUCHET_RANGE) {
-          this.driveSiegeStance(u, dt, false);
-          if (u.siegePhase === "ready" && u.attackTimer <= 0) {
-            this.fireTrebuchet(u, { fire: () => this.trebuchetHitKeep(u, keep) });
-          }
-        } else {
-          this.driveSiegeStance(u, dt, true);
-          if (u.siegePhase === "packed") moveTreb(keep.pos);
-        }
-        return;
-      }
       if (u.holdPosition) {
         const aimHold = this.pickTrebuchetAim(u);
         if (aimHold?.inRange) {
           this.driveSiegeStance(u, dt, false);
           if (u.siegePhase === "ready" && u.attackTimer <= 0) this.fireTrebuchet(u, aimHold);
-        }
-        return;
-      }
-      if (u.guardUnitId != null && u.rallyPoint) {
-        if (dist(u.pos, u.rallyPoint) > 34) {
-          this.driveSiegeStance(u, dt, true);
-          if (u.siegePhase === "packed") moveTreb(u.rallyPoint);
-          return;
-        }
-        const aimGuard = this.pickTrebuchetAim(u);
-        if (aimGuard?.inRange) {
-          this.driveSiegeStance(u, dt, false);
-          if (u.siegePhase === "ready" && u.attackTimer <= 0) this.fireTrebuchet(u, aimGuard);
-          return;
-        }
-        if (dist(u.pos, u.rallyPoint) > 5) {
-          this.driveSiegeStance(u, dt, true);
-          if (u.siegePhase === "packed") moveTreb(u.rallyPoint);
         }
         return;
       }
@@ -5454,6 +5778,13 @@ export class GameSim {
         moveTowards(u.pos, this.spyGoalAroundDogs(u, dest), u.speed, dt);
         if (dist(u.pos, dest) < 5) u.patrolToB = !u.patrolToB;
         return;
+      }
+      if (u.guardUnitId != null) {
+        const leader = this.livingGuardLeader(u);
+        if (leader && this.rallyStanceOf(leader) !== "follow") {
+          this.stepGuardingUnit(u, leader, team, dt, false);
+          return;
+        }
       }
       if (u.rallyPoint) {
         if (dist(u.pos, u.rallyPoint) > 4) {
@@ -6243,6 +6574,184 @@ export class GameSim {
     }
   }
 
+  private escortWeaponRange(u: Unit) {
+    return u.kind === "archer" ? ARCHER_RANGE : 18;
+  }
+
+  private escortAcquireRange(u: Unit) {
+    return u.kind === "archer" ? ARCHER_RANGE : MELEE_AGGRO_RANGE;
+  }
+
+  private returnToGuardSlot(u: Unit, guarded: Unit, dt: number) {
+    u.targetUnitId = undefined;
+    u.engageFrom = undefined;
+    const slot = u.rallyPoint ?? guarded.pos;
+    if (dist(u.pos, slot) > 3.5) moveTowards(u.pos, slot, u.speed, dt);
+  }
+
+  private strikeMilitaryInPlace(u: Unit, target: Unit | Villager, team: Team) {
+    if (u.attackTimer > 0) return;
+    const ranged = u.kind === "archer";
+    const dealt = this.strikeDamage(u, target);
+    target.hp -= dealt;
+    u.attackTimer = u.attackCooldown;
+    this.emitCombat(ranged ? "arrow" : "meleeHit", u.pos, target.pos, team);
+    this.addFloat(`-${Math.round(dealt)}`, target.pos.x, target.pos.y - 7, ranged ? "#e8d39a" : "#ffd1cc");
+  }
+
+  private nearestEscortFoe(
+    u: Unit,
+    team: Team,
+    anyUnit: boolean,
+    slot: Vec2,
+    fromSlot: number,
+    fromSelf: number,
+  ): Unit | Villager | undefined {
+    const enemyTeam = this.enemy(team);
+    let best: Unit | Villager | undefined;
+    let bestD = fromSelf;
+    const consider = (ent: Unit | Villager) => {
+      if (!this.militaryAccepts(u, ent, enemyTeam, anyUnit)) return;
+      if (dist(slot, ent.pos) > fromSlot) return;
+      const d = dist(u.pos, ent.pos);
+      if (d <= bestD) {
+        best = ent;
+        bestD = d;
+      }
+    };
+    for (const e of this.state.units) consider(e);
+    for (const v of this.state.villagers) consider(v);
+    return best;
+  }
+
+  private stepDefensiveGuard(u: Unit, guarded: Unit, team: Team, dt: number, anyUnit: boolean) {
+    const slot = u.rallyPoint ?? guarded.pos;
+    const acquire = this.escortAcquireRange(u);
+    if (dist(u.pos, slot) > acquire) {
+      this.returnToGuardSlot(u, guarded, dt);
+      return;
+    }
+    const threat = this.nearestEscortFoe(u, team, anyUnit, slot, acquire, acquire);
+    if (!threat) {
+      this.returnToGuardSlot(u, guarded, dt);
+      return;
+    }
+    u.targetUnitId = threat.id;
+    u.engageFrom = undefined;
+    if (dist(u.pos, threat.pos) > this.escortWeaponRange(u)) moveTowards(u.pos, threat.pos, u.speed, dt);
+    else this.strikeMilitaryInPlace(u, threat, team);
+  }
+
+  private stepStandGuard(u: Unit, guarded: Unit, team: Team, dt: number, anyUnit: boolean) {
+    const slot = u.rallyPoint ?? guarded.pos;
+    if (dist(u.pos, slot) > 8) {
+      this.returnToGuardSlot(u, guarded, dt);
+      return;
+    }
+    const weapon = this.escortWeaponRange(u);
+    const threat = this.nearestEscortFoe(u, team, anyUnit, u.pos, weapon, weapon);
+    if (!threat) {
+      u.targetUnitId = undefined;
+      u.engageFrom = undefined;
+      return;
+    }
+    u.targetUnitId = threat.id;
+    u.engageFrom = undefined;
+    this.strikeMilitaryInPlace(u, threat, team);
+  }
+
+  private pickAggressiveTarget(
+    u: Unit,
+    leader: Unit,
+    team: Team,
+    anyUnit: boolean,
+  ):
+    | { kind: "unit"; ent: Unit | Villager; pos: Vec2 }
+    | { kind: "building"; ent: Building; pos: Vec2 }
+    | { kind: "barricade"; ent: Barricade; pos: Vec2 }
+    | { kind: "keep"; pos: Vec2 }
+    | null {
+    const enemyTeam = this.enemy(team);
+    let bestD = Infinity;
+    let best:
+      | { kind: "unit"; ent: Unit | Villager; pos: Vec2 }
+      | { kind: "building"; ent: Building; pos: Vec2 }
+      | { kind: "barricade"; ent: Barricade; pos: Vec2 }
+      | { kind: "keep"; pos: Vec2 }
+      | null = null;
+    const nearer = (pos: Vec2) => {
+      const d = dist(leader.pos, pos);
+      if (d > RALLY_AGGRESSIVE_LEASH || d >= bestD) return false;
+      bestD = d;
+      return true;
+    };
+    for (const e of this.state.units) {
+      if (!this.militaryAccepts(u, e, enemyTeam, anyUnit)) continue;
+      if (nearer(e.pos)) best = { kind: "unit", ent: e, pos: e.pos };
+    }
+    for (const v of this.state.villagers) {
+      if (!this.militaryAccepts(u, v, enemyTeam, anyUnit)) continue;
+      if (nearer(v.pos)) best = { kind: "unit", ent: v, pos: v.pos };
+    }
+    for (const b of this.state.buildings) {
+      if (b.team === team || b.hp <= 0) continue;
+      if (nearer(b.pos)) best = { kind: "building", ent: b, pos: b.pos };
+    }
+    for (const wall of this.state.barricades) {
+      if (!wall.built || wall.team === team || wall.hp <= 0) continue;
+      if (nearer(wall.pos)) best = { kind: "barricade", ent: wall, pos: wall.pos };
+    }
+    const keep = this.teamKeep(enemyTeam);
+    if (keep.hp > 0 && nearer(keep.pos)) best = { kind: "keep", pos: keep.pos };
+    return best;
+  }
+
+  private stepAggressiveGuard(u: Unit, guarded: Unit, team: Team, dt: number, anyUnit: boolean) {
+    if (dist(guarded.pos, u.pos) > RALLY_AGGRESSIVE_LEASH) {
+      this.returnToGuardSlot(u, guarded, dt);
+      return;
+    }
+    const goal = this.pickAggressiveTarget(u, guarded, team, anyUnit);
+    if (!goal) {
+      this.returnToGuardSlot(u, guarded, dt);
+      return;
+    }
+    u.engageFrom = undefined;
+    if (goal.kind === "unit") {
+      u.targetUnitId = goal.ent.id;
+      this.fightMilitary(u, goal.ent, team, dt);
+      return;
+    }
+    u.targetUnitId = undefined;
+    if (goal.kind === "building") this.attackBuildingWithUnit(u, goal.ent, team, dt);
+    else if (goal.kind === "barricade") this.attackBarricadeWithUnit(u, goal.ent, team, dt);
+    else this.attackKeepWithUnit(u, team, dt);
+  }
+
+  /** Follow is today's guard. The other stances stay leashed to the leader. */
+  private stepGuardingUnit(u: Unit, guarded: Unit, team: Team, dt: number, anyUnit: boolean) {
+    const stance = this.rallyStanceOf(guarded);
+    if (stance === "defensive") {
+      this.stepDefensiveGuard(u, guarded, team, dt, anyUnit);
+      return;
+    }
+    if (stance === "stand") {
+      this.stepStandGuard(u, guarded, team, dt, anyUnit);
+      return;
+    }
+    if (stance === "aggressive") {
+      this.stepAggressiveGuard(u, guarded, team, dt, anyUnit);
+      return;
+    }
+    const threat = this.pickGuardThreat(u, guarded, team, anyUnit);
+    if (threat) {
+      u.targetUnitId = threat.id;
+      this.fightMilitary(u, threat, team, dt);
+      return;
+    }
+    this.returnToGuardSlot(u, guarded, dt);
+  }
+
   private stepWaveKingGuard(u: Unit, team: Team, dt: number) {
     const king = this.state.units.find(
       (x) => x.id === u.guardUnitId && x.team === team && x.hp > 0 && (x.fieldKills ?? 0) >= FIELD_KING_KILLS,
@@ -6253,16 +6762,7 @@ export class GameSim {
       u.targetUnitId = undefined;
       return false;
     }
-    const threat = this.pickGuardThreat(u, king, team, true);
-    if (threat) {
-      u.targetUnitId = threat.id;
-      this.fightMilitary(u, threat, team, dt);
-      return true;
-    }
-    u.targetUnitId = undefined;
-    u.engageFrom = undefined;
-    const slot = u.rallyPoint ?? king.pos;
-    if (dist(u.pos, slot) > 3.5) moveTowards(u.pos, slot, u.speed, dt);
+    this.stepGuardingUnit(u, king, team, dt, true);
     return true;
   }
 
@@ -6375,6 +6875,63 @@ export class GameSim {
       this.tell(team, `${UNIT_DEFS[u.kind].label} destroyed the ${buildingName(b.kind)}.`);
       this.tell(b.team, `Your ${buildingName(b.kind)} was destroyed!`);
     }
+  }
+
+  private attackBarricadeWithUnit(u: Unit, bar: Barricade, team: Team, dt: number) {
+    const reach = u.kind === "archer" ? ARCHER_RANGE : 22;
+    if (dist(u.pos, bar.pos) > reach) {
+      moveTowards(u.pos, bar.pos, u.speed, dt);
+      return;
+    }
+    if (u.kind === "rammer") {
+      this.state.barricades = this.state.barricades.filter((x) => x.id !== bar.id);
+      this.state.shake = Math.max(this.state.shake, 0.12);
+      this.emitCombat("ramImpact", u.pos, bar.pos, team);
+      this.addFloat("CRUSH", bar.pos.x, bar.pos.y - 9, "#e4bd77");
+      return;
+    }
+    if (u.attackTimer > 0) return;
+    const chip = Math.round(this.outgoing(u, u.kind === "archer" ? Math.max(2, u.damage * 0.5) : barricadeStrike(u.kind)));
+    bar.hp -= chip;
+    u.attackTimer = u.attackCooldown;
+    this.emitCombat(u.kind === "archer" ? "arrow" : bar.hp > 0 ? "woodHit" : "woodBreak", u.pos, bar.pos, team);
+    this.addFloat(bar.hp > 0 ? `-${chip}` : "BREACH", bar.pos.x, bar.pos.y - 9, "#e4bd77");
+    if (bar.hp <= 0) {
+      this.state.shake = Math.max(this.state.shake, 0.07);
+      this.state.barricades = this.state.barricades.filter((x) => x.id !== bar.id);
+    }
+  }
+
+  private attackKeepWithUnit(u: Unit, team: Team, dt: number) {
+    const enemyTeam = this.enemy(team);
+    const keep = this.teamKeep(enemyTeam);
+    const reach = u.kind === "archer" ? ARCHER_RANGE : 34;
+    if (dist(u.pos, keep.pos) <= reach) {
+      if (u.attackTimer <= 0) {
+        const dmg = this.outgoing(u, u.damage * u.keepMult * (this.inChurchAura(u) ? CHURCH_AURA_DAMAGE : 1));
+        keep.hp -= dmg;
+        keep.hitFlash = 0.2;
+        this.emitCombat(
+          u.kind === "rammer" ? "ramImpact" : u.kind === "archer" ? "arrow" : "keepImpact",
+          u.pos,
+          keep.pos,
+          team,
+        );
+        if (enemyTeam === "you") {
+          this.state.redFlash = 0.18;
+          this.state.shake = Math.max(this.state.shake, 0.15);
+        }
+        u.attackTimer = u.attackCooldown + u.siegeGap;
+        this.addFloat(`-${Math.round(dmg)}`, keep.pos.x, keep.pos.y - 18, "#ff9d9d");
+      }
+      return;
+    }
+    const blockingBar = this.state.barricades.find((b) => b.built && b.team !== team && dist(b.pos, u.pos) <= 20);
+    if (blockingBar && u.kind !== "archer") {
+      this.attackBarricadeWithUnit(u, blockingBar, team, dt);
+      return;
+    }
+    moveTowards(u.pos, keep.pos, u.speed, dt);
   }
 
   private stepManualUnitOrder(u: Unit, team: Team, dt: number): boolean {
@@ -6543,20 +7100,9 @@ export class GameSim {
 
     // 6. Guard & Follow a friendly unit (e.g. Trebuchet / Ram / Ward)
     if (u.guardUnitId != null) {
-      const guarded = this.state.units.find((x) => x.id === u.guardUnitId && x.team === team && x.hp > 0);
+      const guarded = this.livingGuardLeader(u);
       if (guarded) {
-        const threat = this.pickGuardThreat(u, guarded, team);
-        if (threat) {
-          u.targetUnitId = threat.id;
-          this.fightMilitary(u, threat, team, dt);
-          return true;
-        }
-        u.targetUnitId = undefined;
-        u.engageFrom = undefined;
-        const slot = u.rallyPoint ?? guarded.pos;
-        if (dist(u.pos, slot) > 3.5) {
-          moveTowards(u.pos, slot, u.speed, dt);
-        }
+        this.stepGuardingUnit(u, guarded, team, dt, false);
         return true;
       }
       u.guardUnitId = undefined;
@@ -6648,7 +7194,9 @@ export class GameSim {
         }
       }
       if (!u.fromBarracks && u.guardUnitId != null && this.waveCanJoinKing(u)) {
-        if (this.stepWaveKingGuard(u, team, dt)) continue;
+        const lead = this.livingGuardLeader(u);
+        const trebOffFollow = u.kind === "trebuchet" && lead != null && this.rallyStanceOf(lead) !== "follow";
+        if (!trebOffFollow && this.stepWaveKingGuard(u, team, dt)) continue;
       }
       if (u.kind === "trebuchet") {
         this.stepTrebuchet(u, team, dt);
@@ -8841,6 +9389,12 @@ export class GameSim {
         case "unitGuard":
           this.applyUnitGuard(team, order.ids, order.guardId);
           break;
+        case "unitRallyAttack":
+          this.applyRallyTrebAttack(team, order.ids, order.target, order.targetId);
+          break;
+        case "rallyStance":
+          this.applyRallyStance(team, order.leaderId, order.stance);
+          break;
         case "unitPatrol":
           this.applyUnitPatrol(team, order.ids, { x: order.x, y: order.y });
           break;
@@ -9073,6 +9627,10 @@ export class GameSim {
         holdPosition: u.holdPosition,
         manualOrder: u.manualOrder,
         fieldKills: u.hp > 0 && (u.fieldKills ?? 0) > 0 ? Math.floor(u.fieldKills ?? 0) : undefined,
+        rallyStance:
+          u.rallyStance === "defensive" || u.rallyStance === "stand" || u.rallyStance === "aggressive"
+            ? u.rallyStance
+            : undefined,
       })),
       villagers: s.villagers.map((v) => ({
         id: v.id,
@@ -9458,6 +10016,10 @@ export class GameSim {
         fieldKills:
           u.hp > 0 && typeof u.fieldKills === "number" && Number.isFinite(u.fieldKills) && u.fieldKills > 0
             ? Math.floor(u.fieldKills)
+            : undefined,
+        rallyStance:
+          u.rallyStance === "defensive" || u.rallyStance === "stand" || u.rallyStance === "aggressive"
+            ? u.rallyStance
             : undefined,
       });
     }
@@ -10116,6 +10678,7 @@ export class GameSim {
       freshHold: this.freshHold,
       fieldSite: this.observer ? null : this.fieldSiteUi(view),
       partner: this.partnerUi(view),
+      rally: this.observer ? null : this.rallyUi(view),
       marketQuotes: { ...s.market[view] },
       selectedCanRaiseMarket:
         !!selected &&
@@ -10181,6 +10744,47 @@ export class GameSim {
               s.finalDuel.proposedBy !== view,
           }
         : null,
+    };
+  }
+
+  private rallyUi(view: Team): RallyUi | null {
+    const counts = this.escortCounts(view);
+    const leaders: Unit[] = [];
+    for (const u of this.state.units) {
+      if (u.team === view && u.hp > 0 && (counts.get(u.id) ?? 0) > 0) leaders.push(u);
+    }
+    if (leaders.length === 0) return null;
+    let chosen: Unit | undefined;
+    if (this.state.possessedId != null) {
+      chosen = leaders.find((u) => u.id === this.state.possessedId);
+    }
+    if (!chosen) {
+      const selected = new Set(this.state.selectedUnitIds);
+      for (const u of this.state.units) {
+        if (!selected.has(u.id) || u.team !== view || u.hp <= 0) continue;
+        if ((counts.get(u.id) ?? 0) > 0) {
+          chosen = u;
+          break;
+        }
+        if (u.guardUnitId != null) {
+          const lead = leaders.find((x) => x.id === u.guardUnitId);
+          if (lead) {
+            chosen = lead;
+            break;
+          }
+        }
+      }
+    }
+    if (!chosen) {
+      leaders.sort((a, b) => (counts.get(b.id) ?? 0) - (counts.get(a.id) ?? 0) || b.id - a.id);
+      chosen = leaders[0];
+    }
+    if (!chosen) return null;
+    return {
+      leaderId: chosen.id,
+      leaderLabel: UNIT_DEFS[chosen.kind].label,
+      stance: this.rallyStanceOf(chosen),
+      several: leaders.length > 1,
     };
   }
 
