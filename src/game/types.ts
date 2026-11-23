@@ -181,6 +181,11 @@ export interface Unit {
    * Stays set until Release to CPU. The assistant never commands these troops.
    */
   humanOwned?: boolean;
+  /**
+   * Kills this soldier scored while a human was driving it.
+   * The count stays across leaving and re-entering the body, and clears when the soldier dies.
+   */
+  fieldKills?: number;
 }
 
 /** First-person body the local player is driving, or none. */

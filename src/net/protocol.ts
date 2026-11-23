@@ -134,6 +134,8 @@ export interface SnapUnit {
   orderTargetKeep?: boolean;
   holdPosition?: boolean;
   manualOrder?: boolean;
+  /** Kills scored while a human was driving this body. Absent means zero. */
+  fieldKills?: number;
 }
 
 export interface SnapVillager {

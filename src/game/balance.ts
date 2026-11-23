@@ -80,25 +80,52 @@ export const BRUTE_TRAIN_TIME = 8;
 export const TEMPLAR_TRAIN_GOLD = 200;
 export const TEMPLAR_TRAIN_WOOD = 200;
 export const TEMPLAR_TRAIN_TIME = 12;
-/** Units guard-following a player-driven soldier deal this much of their damage. */
+/** Units guard-following a player-driven soldier deal this much of their damage at 0–4 kills. */
 export const COMMANDER_ATTACK_MULT = 1.2;
-/** Those same units take this fraction of incoming damage. */
+/** Those same units take this fraction of incoming damage at 0–4 kills. */
 export const COMMANDER_DEFENCE_MULT = 0.8;
-/** Extra reduction vs archers and watchtower / ballista / catapult shots. Stacks with defence. */
+/** Extra reduction vs archers and watchtower / ballista / catapult shots. Stacks with defence. Keep arrows do not. */
 export const COMMANDER_RANGED_MULT = 0.8;
+/** From 5 fielded kills, add this much per kill — including the first five — on top of the base 20%. */
+export const COMMANDER_KILL_STEP = 0.05;
+/** Cap on the total commander bonus. Ten fielded kills is +70%. */
+export const COMMANDER_BONUS_CAP = 0.7;
+/** A living soldier at this many fielded kills wears a crown and musters unordered friendly waves. */
+export const FIELD_KING_KILLS = 10;
 
-export function commanderDamageDealt(raw: number, buffed: boolean) {
-  if (!buffed || !Number.isFinite(raw)) return raw;
-  return raw * COMMANDER_ATTACK_MULT;
+/**
+ * Commander bonus from kills scored while that soldier was being driven.
+ * Below 5 the bonus stays at 20%. From 5 it is 20% + 5% per kill, capped at 70%.
+ */
+export function commanderFieldBonus(kills: number) {
+  const n = Number.isFinite(kills) ? Math.max(0, Math.floor(kills)) : 0;
+  const base = COMMANDER_ATTACK_MULT - 1;
+  if (n < 5) return base;
+  return Math.min(base + COMMANDER_KILL_STEP * n, COMMANDER_BONUS_CAP);
+}
+
+const COMMANDER_BONUS_BASE = commanderFieldBonus(0);
+
+/** Damage dealt by a guard of a driven soldier. `bonus` is false when the buff is off. */
+export function commanderDamageDealt(raw: number, bonus: number | false) {
+  if (bonus === false || !Number.isFinite(raw) || !Number.isFinite(bonus)) return raw;
+  if (bonus === COMMANDER_BONUS_BASE) return raw * COMMANDER_ATTACK_MULT;
+  return raw * (1 + bonus);
 }
 
 /**
- * Damage after the commander guard buff.
- * General defence is ×0.8. Archer and defensive-building hits are ×0.8 again (×0.64).
+ * Damage taken by a guard of a driven soldier.
+ * General defence is 1 − bonus (×0.8 at 0–4 kills). Archer and watchtower, ballista,
+ * and catapult hits take another ×0.8. Keep arrows stay on the general defence only.
  */
-export function commanderDamageTaken(raw: number, buffed: boolean, fromArcherOrTower: boolean) {
-  if (!buffed || !Number.isFinite(raw)) return raw;
-  const mult = fromArcherOrTower ? COMMANDER_DEFENCE_MULT * COMMANDER_RANGED_MULT : COMMANDER_DEFENCE_MULT;
+export function commanderDamageTaken(raw: number, bonus: number | false, fromArcherOrTower: boolean) {
+  if (bonus === false || !Number.isFinite(raw) || !Number.isFinite(bonus)) return raw;
+  if (bonus === COMMANDER_BONUS_BASE) {
+    const mult = fromArcherOrTower ? COMMANDER_DEFENCE_MULT * COMMANDER_RANGED_MULT : COMMANDER_DEFENCE_MULT;
+    return raw * mult;
+  }
+  const defence = 1 - bonus;
+  const mult = fromArcherOrTower ? defence * COMMANDER_RANGED_MULT : defence;
   return raw * mult;
 }
 

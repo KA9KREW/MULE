@@ -7,6 +7,7 @@ import {
   KEEP_DONJON_TOP,
   KEEP_PICK_RADIUS,
   KEEP_PICK_TOP,
+  FIELD_KING_KILLS,
   POSSESS_FOV_TIGHT,
   POSSESS_FOV_WIDE,
   POSSESS_PULL_MAX,
@@ -312,6 +313,8 @@ export class GameRenderer {
   private fpsHead: THREE.Object3D | null = null;
   private fpsEye = new THREE.Vector3();
   private fpsAt = new THREE.Vector3();
+  private crownPoint = new THREE.Vector3();
+  private fieldCrownMat: THREE.MeshStandardMaterial | null = null;
   private fpsHands = new THREE.Group();
   private fpsSword = new THREE.Group();
   private fpsBow = new THREE.Group();
@@ -2129,6 +2132,7 @@ export class GameRenderer {
     for (const [k, obj] of this.entityMap) {
       if (!k.startsWith(prefix)) continue;
       if (!live.has(k)) {
+        if (prefix === "unit-") this.disposeFieldCrown(obj);
         this.dynamicRoot.remove(obj);
         if (prefix === "cmd-") this.disposeCommandMarkerObject(obj);
         this.clearAnimation(k);
@@ -2551,6 +2555,7 @@ export class GameRenderer {
       live.add(key);
       let obj = this.entityMap.get(key);
       if (obj && obj.userData.unitKind !== u.kind) {
+        this.disposeFieldCrown(obj);
         this.dynamicRoot.remove(obj);
         this.clearAnimation(key);
         this.entityMap.delete(key);
@@ -2594,8 +2599,78 @@ export class GameRenderer {
       } else {
         animateUnit(obj, state.time + u.id * 0.37, { x: u.pos.x, y: u.pos.y, timer: u.attackTimer });
       }
+      this.syncFieldCrown(obj, u);
     }
     this.prune("unit-", live);
+  }
+
+  /** Small gold circlet, the same idea as the crown on an upgraded keep. */
+  private fieldCrownMaterial() {
+    if (!this.fieldCrownMat) {
+      this.fieldCrownMat = new THREE.MeshStandardMaterial({
+        color: 0xf3d36a,
+        metalness: 0.7,
+        roughness: 0.25,
+        emissive: 0xb8860b,
+        emissiveIntensity: 0.45,
+      });
+    }
+    return this.fieldCrownMat;
+  }
+
+  private makeFieldCrown() {
+    const crown = new THREE.Group();
+    crown.name = "field-crown";
+    const gold = this.fieldCrownMaterial();
+    const circlet = new THREE.Mesh(new THREE.TorusGeometry(0.72, 0.1, 6, 14), gold);
+    circlet.rotation.x = Math.PI / 2;
+    circlet.castShadow = true;
+    crown.add(circlet);
+    for (let i = 0; i < 5; i++) {
+      const a = (i / 5) * Math.PI * 2;
+      const point = new THREE.Mesh(new THREE.ConeGeometry(0.14, 0.5, 4), gold);
+      point.position.set(Math.cos(a) * 0.66, 0.28, Math.sin(a) * 0.66);
+      point.castShadow = true;
+      crown.add(point);
+    }
+    return crown;
+  }
+
+  private disposeFieldCrown(obj: THREE.Object3D) {
+    const crown = obj.userData.fieldCrown as THREE.Object3D | undefined;
+    if (!crown) return;
+    crown.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (mesh.isMesh) mesh.geometry.dispose();
+    });
+    obj.remove(crown);
+    obj.userData.fieldCrown = undefined;
+  }
+
+  /** Crown sits above the head while this soldier has 10 fielded kills and is still alive. */
+  private syncFieldCrown(obj: THREE.Object3D, u: Unit) {
+    const show = u.hp > 0 && (u.fieldKills ?? 0) >= FIELD_KING_KILLS;
+    let crown = obj.userData.fieldCrown as THREE.Group | undefined;
+    if (!show) {
+      if (crown) crown.visible = false;
+      return;
+    }
+    if (!crown) {
+      crown = this.makeFieldCrown();
+      obj.add(crown);
+      obj.userData.fieldCrown = crown;
+    }
+    crown.visible = true;
+    const head = this.findUnitHead(obj, u.kind);
+    if (!head) {
+      const y = u.kind === "trebuchet" ? 20 : u.kind === "rammer" ? 16 : u.kind === "runner" ? 15.2 : 13.4;
+      crown.position.set(0, y, 0);
+      return;
+    }
+    obj.updateMatrixWorld(true);
+    head.getWorldPosition(this.crownPoint);
+    obj.worldToLocal(this.crownPoint);
+    crown.position.set(this.crownPoint.x, this.crownPoint.y + 1.65, this.crownPoint.z);
   }
 
   /** Team ring, screen name, and a thin HP bar while this body is being driven. */

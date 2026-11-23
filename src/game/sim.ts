@@ -23,6 +23,8 @@ import {
   CHURCH_UPGRADE_GOLD,
   commanderDamageDealt,
   commanderDamageTaken,
+  commanderFieldBonus,
+  FIELD_KING_KILLS,
   freshMarketBook,
   MARKET_LOT,
   MARKET_UPGRADE_GOLD,
@@ -1784,8 +1786,10 @@ export class GameSim {
     const lookHit = { x: u.pos.x + fx * Math.min(reach, 80), y: u.pos.y + fy * Math.min(reach, 80) };
 
       if (best) {
+      const hpBefore = best.hp;
       const dealt = this.strikeDamage(u, best) * POSSESS_DAMAGE_MULT;
       best.hp -= dealt;
+      if ("fromBarracks" in best) this.creditFieldKill(u, best, hpBefore);
       if (this.matchMode === "arena" && "kind" in best && !("state" in best)) {
         (best as Unit).lastHitBy = u.id;
       }
@@ -3486,6 +3490,7 @@ export class GameSim {
     };
     this.state.units.push(u);
     this.attachCommanderRally(u, rallyFrom ?? barracks);
+    this.attachFieldKing(u);
     if (u.manualOrder) {
       // Rally-to-player already set a guard slot. Leave the barracks formation alone.
     } else if (fromBarracks && holdLayer && holdLayer !== "assault") {
@@ -4838,8 +4843,10 @@ export class GameSim {
   }
 
   private trebuchetHitUnit(u: Unit, target: Unit) {
+    const hpBefore = target.hp;
     const dmg = this.incoming(target, this.outgoing(u, trebuchetShot(target.maxHp)), false);
     target.hp -= dmg;
+    this.creditFieldKill(u, target, hpBefore);
     this.emitCombat("trebuchet", u.pos, target.pos, u.team);
     this.addFloat(`-${dmg}`, target.pos.x, target.pos.y - 8, "#e8d39a");
     if (u.id === this.state.possessedId) this.notePossessVision(target.hp <= 0 ? 1 : 0.25);
@@ -5326,7 +5333,9 @@ export class GameSim {
       this.spyBurn(u, "dogs");
       return;
     }
+    const hpBefore = target.hp;
     target.hp = 0;
+    this.creditFieldKill(u, target, hpBefore);
     u.attackTimer = u.attackCooldown;
     this.emitCombat("sabotage", u.pos, target.pos, u.team);
     this.addFloat("SABOTAGE", target.pos.x, target.pos.y - 10, "#c8b8ff");
@@ -5923,10 +5932,11 @@ export class GameSim {
     return true;
   }
 
-  private militaryAccepts(u: Unit, ent: Unit | Villager, enemyTeam: Team) {
+  private militaryAccepts(u: Unit, ent: Unit | Villager, enemyTeam: Team, anyUnit = false) {
     if (ent.hp <= 0 || ent.team !== enemyTeam) return false;
-    if ("fromBarracks" in ent) return !u.ignoreEnemyCreeps || ent.fromBarracks;
-    return (u.fromBarracks || u.kind === "archer") && ent.state !== "garrisoned";
+    if ("fromBarracks" in ent) return anyUnit || !u.ignoreEnemyCreeps || ent.fromBarracks;
+    if (ent.state === "garrisoned") return false;
+    return anyUnit || u.fromBarracks || u.kind === "archer";
   }
 
   private pickMilitaryHostile(u: Unit, team: Team): Unit | Villager | undefined {
@@ -6024,22 +6034,32 @@ export class GameSim {
     return this.incoming(target, this.outgoing(attacker, dealt), true);
   }
 
-  /** +20% damage while guard-following a soldier a player is currently driving. */
-  private commanderBuffed(u: Unit) {
+  /**
+   * Guard buff while following a soldier a human is driving right now.
+   * Stepping out keeps the guard and turns the buff off. The size follows that soldier's fielded kills.
+   */
+  private commanderBonus(u: Unit): number | false {
     if (u.hp <= 0 || u.guardUnitId == null || u.guardUnitId === u.id) return false;
     const lead = this.state.units.find((x) => x.id === u.guardUnitId && x.team === u.team && x.hp > 0);
-    if (!lead || lead.id === u.id) return false;
-    return this.isPlayerDriven(lead);
+    if (!lead || lead.id === u.id || !this.isPlayerDriven(lead)) return false;
+    return commanderFieldBonus(lead.fieldKills ?? 0);
+  }
+
+  /** A killing blow counts only while a human is driving the soldier who landed it. */
+  private creditFieldKill(attacker: Unit, victim: Unit, hpBefore: number) {
+    if (hpBefore <= 0 || victim.hp > 0 || victim.team === attacker.team) return;
+    if (!this.isPlayerDriven(attacker)) return;
+    attacker.fieldKills = (attacker.fieldKills ?? 0) + 1;
   }
 
   private outgoing(attacker: Unit, raw: number) {
-    return commanderDamageDealt(raw, this.commanderBuffed(attacker));
+    return commanderDamageDealt(raw, this.commanderBonus(attacker));
   }
 
   /** Villagers are never commander escorts. Archers and defensive buildings take the extra cut. */
   private incoming(target: Unit | Villager, raw: number, fromArcherOrTower: boolean) {
     if (!("fromBarracks" in target)) return raw;
-    return commanderDamageTaken(raw, this.commanderBuffed(target), fromArcherOrTower);
+    return commanderDamageTaken(raw, this.commanderBonus(target), fromArcherOrTower);
   }
 
   private fightMilitary(u: Unit, target: Unit | Villager, team: Team, dt: number) {
@@ -6140,18 +6160,117 @@ export class GameSim {
     u.targetUnitId = undefined;
   }
 
+  private unitInControlGroup(id: number) {
+    for (const group of this.controlGroups.values()) {
+      if (group.kind === "units" && group.ids.includes(id)) return true;
+    }
+    return false;
+  }
+
+  /** Living soldier with 10 or more fielded kills. A driven king outranks one the player has stepped out of. */
+  private livingFieldKing(team: Team): Unit | null {
+    let best: Unit | null = null;
+    for (const u of this.state.units) {
+      if (u.team !== team || u.hp <= 0 || (u.fieldKills ?? 0) < FIELD_KING_KILLS) continue;
+      if (!best || this.kingOutranks(u, best)) best = u;
+    }
+    return best;
+  }
+
+  private kingOutranks(u: Unit, best: Unit) {
+    const driven = this.isPlayerDriven(u);
+    const bestDriven = this.isPlayerDriven(best);
+    if (driven !== bestDriven) return driven;
+    const kills = u.fieldKills ?? 0;
+    const bestKills = best.fieldKills ?? 0;
+    if (kills !== bestKills) return kills > bestKills;
+    return u.id > best.id;
+  }
+
+  /**
+   * Unordered friendly wave troop. Player orders, control groups, and human-owned troops stay put.
+   */
+  private waveCanJoinKing(u: Unit) {
+    if (u.hp <= 0 || u.fromBarracks) return false;
+    if (u.humanOwned || u.manualOrder || this.unitInControlGroup(u.id)) return false;
+    if (
+      u.orderTargetUnitId != null ||
+      u.orderTargetBuildingId != null ||
+      u.orderTargetBarricadeId != null ||
+      u.orderTargetKeep ||
+      u.holdPosition ||
+      (u.patrolA && u.patrolB)
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  /** New wave spawns, and waves already on the field, guard the living 10-kill soldier. */
+  private attachFieldKing(u: Unit) {
+    if (!this.waveCanJoinKing(u)) return;
+    const king = this.livingFieldKing(u.team);
+    if (!king || king.id === u.id) return;
+    u.guardUnitId = king.id;
+    u.lane = king.lane;
+  }
+
+  private musterFieldKing(team: Team) {
+    const king = this.livingFieldKing(team);
+    for (const u of this.state.units) {
+      if (u.team !== team || !this.waveCanJoinKing(u)) continue;
+      if (!king || king.id === u.id) {
+        if (u.guardUnitId != null) {
+          u.guardUnitId = undefined;
+          u.rallyPoint = undefined;
+          u.targetUnitId = undefined;
+        }
+        continue;
+      }
+      if (u.guardUnitId === king.id) continue;
+      u.guardUnitId = king.id;
+      u.lane = king.lane;
+    }
+  }
+
+  /** Drop wave followers when their king dies. Player-ordered guards keep the normal guard release. */
+  private releaseWaveKing(kingId: number) {
+    for (const ally of this.state.units) {
+      if (ally.guardUnitId !== kingId || ally.fromBarracks || ally.manualOrder || ally.humanOwned) continue;
+      ally.guardUnitId = undefined;
+      ally.rallyPoint = undefined;
+      ally.targetUnitId = undefined;
+    }
+  }
+
+  private stepWaveKingGuard(u: Unit, team: Team, dt: number) {
+    const king = this.state.units.find(
+      (x) => x.id === u.guardUnitId && x.team === team && x.hp > 0 && (x.fieldKills ?? 0) >= FIELD_KING_KILLS,
+    );
+    if (!king) {
+      u.guardUnitId = undefined;
+      u.rallyPoint = undefined;
+      u.targetUnitId = undefined;
+      return false;
+    }
+    const threat = this.pickGuardThreat(u, king, team, true);
+    if (threat) {
+      u.targetUnitId = threat.id;
+      this.fightMilitary(u, threat, team, dt);
+      return true;
+    }
+    u.targetUnitId = undefined;
+    u.engageFrom = undefined;
+    const slot = u.rallyPoint ?? king.pos;
+    if (dist(u.pos, slot) > 3.5) moveTowards(u.pos, slot, u.speed, dt);
+    return true;
+  }
+
   private refreshGuardFormations(team: Team) {
     const groups = new Map<number, Unit[]>();
     for (const u of this.state.units) {
-      if (
-        u.team !== team ||
-        !u.fromBarracks ||
-        u.hp <= 0 ||
-        u.guardUnitId == null ||
-        this.isPlayerDriven(u)
-      ) {
-        continue;
-      }
+      if (u.team !== team || u.hp <= 0 || u.guardUnitId == null || this.isPlayerDriven(u)) continue;
+      if (!u.fromBarracks && !this.waveCanJoinKing(u)) continue;
       let list = groups.get(u.guardUnitId);
       if (!list) {
         list = [];
@@ -6164,8 +6283,13 @@ export class GameSim {
       if (!guarded) {
         for (const e of escorts) {
           e.guardUnitId = undefined;
-          if (!e.rallyPoint) e.rallyPoint = { ...e.pos };
-          e.manualOrder = true;
+          e.targetUnitId = undefined;
+          if (e.fromBarracks) {
+            if (!e.rallyPoint) e.rallyPoint = { ...e.pos };
+            e.manualOrder = true;
+          } else {
+            e.rallyPoint = undefined;
+          }
         }
         continue;
       }
@@ -6178,7 +6302,7 @@ export class GameSim {
     }
   }
 
-  private pickGuardThreat(u: Unit, guarded: Unit, team: Team): Unit | Villager | undefined {
+  private pickGuardThreat(u: Unit, guarded: Unit, team: Team, anyUnit = false): Unit | Villager | undefined {
     const enemyTeam = this.enemy(team);
     const guardThreatRadius = 152;
     const guardLeashRadius = 185;
@@ -6188,7 +6312,7 @@ export class GameSim {
       const current = this.livingHostile(team, u.targetUnitId, true);
       if (
         current &&
-        this.militaryAccepts(u, current, enemyTeam) &&
+        this.militaryAccepts(u, current, enemyTeam, anyUnit) &&
         dist(guarded.pos, current.pos) <= guardLeashRadius
       ) {
         return current;
@@ -6211,11 +6335,11 @@ export class GameSim {
     };
 
     for (const e of this.state.units) {
-      if (!this.militaryAccepts(u, e, enemyTeam)) continue;
+      if (!this.militaryAccepts(u, e, enemyTeam, anyUnit)) continue;
       consider(e, e.targetUnitId === guarded.id || e.orderTargetUnitId === guarded.id);
     }
     for (const v of this.state.villagers) {
-      if (!this.militaryAccepts(u, v, enemyTeam)) continue;
+      if (!this.militaryAccepts(u, v, enemyTeam, anyUnit)) continue;
       consider(v, v.targetEnemyId === guarded.id);
     }
     return best;
@@ -6488,6 +6612,7 @@ export class GameSim {
 
   private updateUnitMovementAndMelee(dt: number, team: Team) {
     const enemyTeam = this.enemy(team);
+    this.musterFieldKing(team);
     this.refreshGuardFormations(team);
     for (const u of this.state.units.filter((x) => x.team === team)) {
       if ((u.rallyCooldown ?? 0) > 0) u.rallyCooldown = Math.max(0, u.rallyCooldown! - dt);
@@ -6521,6 +6646,9 @@ export class GameSim {
           }
           continue;
         }
+      }
+      if (!u.fromBarracks && u.guardUnitId != null && this.waveCanJoinKing(u)) {
+        if (this.stepWaveKingGuard(u, team, dt)) continue;
       }
       if (u.kind === "trebuchet") {
         this.stepTrebuchet(u, team, dt);
@@ -6747,6 +6875,8 @@ export class GameSim {
           drive.strike = false;
         }
       }
+      u.fieldKills = 0;
+      this.releaseWaveKing(u.id);
       const killer = this.enemy(u.team);
       this.state.gold[killer] += u.bounty;
       this.state.stats[killer].goldEarned += u.bounty;
@@ -8942,6 +9072,7 @@ export class GameSim {
         orderTargetKeep: u.orderTargetKeep,
         holdPosition: u.holdPosition,
         manualOrder: u.manualOrder,
+        fieldKills: u.hp > 0 && (u.fieldKills ?? 0) > 0 ? Math.floor(u.fieldKills ?? 0) : undefined,
       })),
       villagers: s.villagers.map((v) => ({
         id: v.id,
@@ -9324,6 +9455,10 @@ export class GameSim {
         orderTargetKeep: u.orderTargetKeep,
         holdPosition: u.holdPosition,
         manualOrder: u.manualOrder,
+        fieldKills:
+          u.hp > 0 && typeof u.fieldKills === "number" && Number.isFinite(u.fieldKills) && u.fieldKills > 0
+            ? Math.floor(u.fieldKills)
+            : undefined,
       });
     }
     s.villagers = [];
