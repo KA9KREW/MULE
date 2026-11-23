@@ -25,6 +25,8 @@ import { TouchFpsPad } from "./ui/TouchFpsPad";
 import { LandscapeLock, tryLockLandscape } from "./ui/LandscapeLock";
 import { skirmishMaps } from "./game/map";
 import { useSkirmish } from "./net/useSkirmish";
+import { ObserverBoard } from "./ui/ObserverBoard";
+import { CompanyLobby } from "./ui/CompanyLobby";
 import { SkirmishEnd, SkirmishLobby } from "./ui/SkirmishLobby";
 import { ChatLog } from "./ui/ChatDock";
 import { afterPortalBreak, bindPortalAudio, onMatchEndToMenu, onMatchStart, onReturnToTitle } from "./portal";
@@ -114,6 +116,19 @@ const defaultUi: UiSnapshot = {
   foeLastAction: "wait",
   localTeam: "you",
   pvp: false,
+  observer: false,
+  blueGold: 0,
+  blueWood: 0,
+  blueArmy: 0,
+  blueArmyCap: BASE_ARMY_CAP,
+  blueKeep: 100,
+  blueKeepMax: 100,
+  redGold: 0,
+  redWood: 0,
+  redArmy: 0,
+  redArmyCap: BASE_ARMY_CAP,
+  redKeep: 100,
+  redKeepMax: 100,
   playerWins: 0,
   missionId: null,
   missionName: "",
@@ -621,7 +636,7 @@ export default function App() {
         renderer.ensurePossess(sim.getPossessYaw(), body?.kind === "trebuchet");
       }
       const home = sim.getLocalTeam();
-      if (renderer.getHomeSide() !== home) renderer.setHomeSide(home);
+      if (!renderer.isFieldView() && renderer.getHomeSide() !== home) renderer.setHomeSide(home);
       renderer.draw(gameState);
       if (heardMapRef.current !== gameState.mapId) {
         heardMapRef.current = gameState.mapId;
@@ -637,7 +652,7 @@ export default function App() {
       }
       uiTick += Math.min(1, elapsed);
       const snap = sim.getUiSnapshot();
-      if (snap.yourHp < hpRef.current) beep(110, 0.08);
+      if (!sim.isObserver() && snap.yourHp < hpRef.current) beep(110, 0.08);
       hpRef.current = snap.yourHp;
       if (uiTick >= 0.08) {
         setUi(snap);
@@ -670,6 +685,12 @@ export default function App() {
     const onDown = (ev: PointerEvent) => {
       const r = rendererRef.current;
       if (!r) return;
+      if (sim.isObserver()) {
+        if (ev.button === 1 || ev.button === 2) ev.preventDefault();
+        r.onPointerDown(ev);
+        if (!sim.getState().audioUnlocked) sim.unlockAudio();
+        return;
+      }
       if (sim.getState().possessedId != null) {
         // Skip RTS clicks while fielded. Don't cancel the mouse event when the
         // pointer is free, or the document handler can't recapture look.
@@ -764,6 +785,10 @@ export default function App() {
     const onUp = (ev: PointerEvent) => {
       const r = rendererRef.current;
       if (!r) return;
+      if (sim.isObserver()) {
+        r.onPointerUp(ev);
+        return;
+      }
       if (sim.getState().possessedId != null) {
         clearLongPress();
         return;
@@ -1123,6 +1148,46 @@ export default function App() {
       const r = rendererRef.current;
       const possessed = sim.getState().possessedId != null;
       const step = ev.key.toLowerCase();
+      if (sim.isObserver()) {
+        if (ev.key === "f" || ev.key === "F") void toggleFullscreen();
+        if (ev.key === "Escape") {
+          ev.preventDefault();
+          const now = performance.now();
+          if (fullscreenElement() && now - lastEscFullscreenRef.current <= 650) {
+            lastEscFullscreenRef.current = 0;
+            void toggleFullscreen();
+          } else if (fullscreenElement()) {
+            lastEscFullscreenRef.current = now;
+          }
+          return;
+        }
+        if (r) {
+          if (ev.key === "=" || ev.key === "+") r.zoomBy(0.9);
+          if (ev.key === "-" || ev.key === "_") r.zoomBy(1.1);
+          if (ev.key === "r" || ev.key === "R" || ev.key === "h" || ev.key === "H") r.resetCamera();
+          if (ev.key === "b" || ev.key === "B") r.focusBattle(sim.getState());
+          if (
+            !ev.ctrlKey &&
+            !ev.metaKey &&
+            !ev.altKey &&
+            (step === "w" ||
+              step === "a" ||
+              step === "s" ||
+              step === "d" ||
+              step === "q" ||
+              step === "e" ||
+              ev.key === "ArrowLeft" ||
+              ev.key === "ArrowRight" ||
+              ev.key === "ArrowUp" ||
+              ev.key === "ArrowDown")
+          ) {
+            if (ev.key.startsWith("Arrow")) ev.preventDefault();
+            r.setCamKey(ev.key, true);
+          }
+          setZoomT(r.getZoomT());
+        }
+        return;
+      }
       if (possessed && (step === "w" || step === "a" || step === "s" || step === "d")) {
         ev.preventDefault();
         sim.setPossessKey(step, true);
@@ -1535,15 +1600,17 @@ export default function App() {
     rendererRef.current?.setQuality(setting);
   };
 
+  const spectating = skirmish.lobby.watching && skirmish.lobby.live;
   const sheetOpen =
-    ui.selectedKeepTeam === ui.localTeam ||
-    Boolean(ui.selectedBuildingId && ui.selectedBuildingKind) ||
-    Boolean(ui.selectedArmy && ui.selectedArmy.count > 0);
+    !spectating &&
+    (ui.selectedKeepTeam === ui.localTeam ||
+      Boolean(ui.selectedBuildingId && ui.selectedBuildingKind) ||
+      Boolean(ui.selectedArmy && ui.selectedArmy.count > 0));
   const compactHud = layout.layout === "column" || layout.phone;
   const compactBuild = layout.layout === "column" && layout.phone;
   /** Arena: Commands while paused or waiting on the respawn screen (no body). */
   const showCommandRail =
-    ui.phase === "running" && (!ui.arena || ui.paused || !ui.possessed);
+    !spectating && ui.phase === "running" && (!ui.arena || ui.paused || !ui.possessed);
 
   const returnToMenu = () => {
     lockWantedRef.current = false;
@@ -1909,6 +1976,7 @@ export default function App() {
     layout.fpsTouch ? "is-fps-touch" : "",
     layout.android ? "is-android" : "",
     isFullscreen ? "is-fullscreen" : "",
+    spectating ? "is-observer" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -1922,7 +1990,7 @@ export default function App() {
           <span className="brand-sub">three.js siege · dusk valley</span>
         </header>
 
-        {(() => {
+        {!spectating && (() => {
           const hud = (
             <Hud
               ui={ui}
@@ -1976,7 +2044,17 @@ export default function App() {
                 : "battlefield"
             }
           />
-          {ui.phase === "running" && !ui.arena && <KeepTugBar ui={ui} />}
+          {spectating && ui.phase !== "title" && (
+            <ObserverBoard
+              ui={ui}
+              onLeave={() => {
+                skirmish.leave();
+                refreshUi();
+                hpRef.current = 100;
+              }}
+            />
+          )}
+          {ui.phase === "running" && !ui.arena && !spectating && <KeepTugBar ui={ui} />}
           {ui.possessed && (
             <div className={`fps-hud${ui.possessed.kind === "trebuchet" ? " treb-hud" : ""}`}>
               <span className="fps-crosshair" aria-hidden />
@@ -2079,7 +2157,7 @@ export default function App() {
               {m.label && <em>{m.label}</em>}
             </span>
           ))}
-          {ui.selectedPeonCount > 0 && ui.phase === "running" && !ui.arena && !sheetOpen && (
+          {!spectating && ui.selectedPeonCount > 0 && ui.phase === "running" && !ui.arena && !sheetOpen && (
             <div className="unit-command-bar" role="toolbar" aria-label="Peon orders">
               <strong>
                 {ui.selectedPeonCount} peon{ui.selectedPeonCount === 1 ? "" : "s"}
@@ -2148,12 +2226,12 @@ export default function App() {
               Army Patrol: {layout.touch ? "tap" : "click or right-click"} the destination
             </div>
           )}
-          {hint && (
+          {!spectating && hint && (
             <button type="button" className="hint-toast" onClick={dismissHint} aria-live="polite">
               {hint.text}
             </button>
           )}
-          {radial && radialItems.length > 0 && (
+          {!spectating && radial && radialItems.length > 0 && (
             <RadialMenu
               x={radial.x}
               y={radial.y}
@@ -2244,14 +2322,14 @@ export default function App() {
               </div>
             </div>
           )}
-          {!layout.touch && (
+          {!spectating && !layout.touch && (
             <p className="cam-hint">
               WASD/Arrows or Mid/Shift-drag pan · Wheel zooms to cursor · Right-drag orbit · B battle · R keep
             </p>
           )}
           <div className="sheet-dock">
             <div className="sheet-slot">
-            {ui.fieldSite && (
+            {!spectating && ui.fieldSite && (
               <FieldSitePanel
                 site={ui.fieldSite}
                 touch={layout.touch}
@@ -2303,7 +2381,7 @@ export default function App() {
                 }}
               />
             )}
-            {!ui.arena && !ui.fieldSite && (
+            {!spectating && !ui.arena && !ui.fieldSite && (
             <DetailSheet
             ui={ui}
             onClose={() => {
@@ -2448,6 +2526,7 @@ export default function App() {
               beep(440);
             }}
             onSkirmish={skirmish.openLobby}
+            onCompany={skirmish.openCompany}
             onCampaign={() => {
               setTriumph(null);
               setCampaignOpen(true);
@@ -2487,6 +2566,7 @@ export default function App() {
               if (skirmish.lobby.open || skirmish.lobby.live) return;
               setCampaignOpen(false);
               afterPortalBreak(() => {
+                sim.clearCompany();
                 sim.setArcadeDifficulty(difficulty);
                 sim.setMatchMode("ai");
                 sim.setLocalTeam("you");
@@ -2542,7 +2622,52 @@ export default function App() {
               }}
             />
           )}
-          {skirmish.lobby.open && !skirmish.lobby.live && (
+          {skirmish.lobby.open && !skirmish.lobby.live && skirmish.lobby.mode === "company" && (
+            <CompanyLobby
+              name={skirmish.name}
+              onName={skirmish.setName}
+              role={skirmish.lobby.role}
+              players={skirmish.lobby.players}
+              localPlayerId={skirmish.lobby.localPlayerId}
+              localTeam={skirmish.lobby.localTeam}
+              setup={skirmish.lobby.company}
+              invite={skirmish.lobby.invite}
+              joinDraft={skirmish.lobby.joinDraft}
+              onJoinDraft={skirmish.setJoinDraft}
+              status={skirmish.lobby.status}
+              link={skirmish.lobby.link}
+              copied={skirmish.lobby.copied}
+              canStart={skirmish.companyCanStart}
+              onHost={skirmish.hostMatch}
+              onJoin={() => skirmish.joinMatch()}
+              onCopy={() => void skirmish.copyInvite()}
+              onShare={() => void skirmish.shareInvite()}
+              onStart={() => {
+                afterPortalBreak(() => {
+                  skirmish.startCompany();
+                  refreshUi();
+                  beep(520);
+                });
+              }}
+              onLeave={() => {
+                skirmish.leave();
+                refreshUi();
+              }}
+              onDifficulty={skirmish.setCompanyDifficulty}
+              onSeat={skirmish.setCompanySeat}
+              onSit={skirmish.sitCompany}
+              allowObservers={skirmish.lobby.allowObservers}
+              watchers={skirmish.lobby.watchers}
+              watching={skirmish.lobby.watching}
+              pendingWatch={skirmish.lobby.pendingWatch}
+              copiedWatch={skirmish.lobby.copiedWatch}
+              onAllowObservers={skirmish.setAllowObservers}
+              onObserve={skirmish.askToObserve}
+              onObserveJoin={() => skirmish.joinMatch(undefined, true)}
+              onCopyWatch={() => void skirmish.copyObserverInvite()}
+            />
+          )}
+          {skirmish.lobby.open && !skirmish.lobby.live && skirmish.lobby.mode !== "company" && (
             <SkirmishLobby
               name={skirmish.name}
               onName={skirmish.setName}
@@ -2572,9 +2697,18 @@ export default function App() {
                 skirmish.leave();
                 refreshUi();
               }}
+              allowObservers={skirmish.lobby.allowObservers}
+              watchers={skirmish.lobby.watchers}
+              watching={skirmish.lobby.watching}
+              pendingWatch={skirmish.lobby.pendingWatch}
+              copiedWatch={skirmish.lobby.copiedWatch}
+              onAllowObservers={skirmish.setAllowObservers}
+              onObserve={skirmish.askToObserve}
+              onObserveJoin={() => skirmish.joinMatch(undefined, true)}
+              onCopyWatch={() => void skirmish.copyObserverInvite()}
             />
           )}
-          {skirmish.lobby.live && (
+          {skirmish.lobby.live && !spectating && (
             <div className="link-pill" role="status">
               {skirmish.lobby.link === "down"
                 ? "Link lost"
@@ -2590,11 +2724,14 @@ export default function App() {
               maps={skirmishMaps()}
               mapId={skirmish.lobby.selectedMapId}
               linkDown={skirmish.lobby.link === "down"}
+              watching={skirmish.lobby.watching}
               canRematch={
                 skirmish.lobby.role === "host" &&
                 skirmish.lobby.link === "open" &&
-                skirmish.lobby.players.some((p) => p.team === "you") &&
-                skirmish.lobby.players.some((p) => p.team === "foe")
+                (skirmish.lobby.mode === "company"
+                  ? skirmish.lobby.players.length > 0
+                  : skirmish.lobby.players.some((p) => p.team === "you") &&
+                    skirmish.lobby.players.some((p) => p.team === "foe"))
               }
               onPick={skirmish.pickMap}
               onRematch={() => {
@@ -2611,12 +2748,12 @@ export default function App() {
           )}
           {skirmish.lobby.link === "down" && ui.phase === "running" && (
             <div className="opponent-down" role="alert">
-              Opponent disconnected
+              {spectating ? "Connection lost" : "Opponent disconnected"}
             </div>
           )}
         </div>
 
-        {ui.phase === "running" && !ui.arena && (
+        {ui.phase === "running" && !ui.arena && !spectating && (
           <BuildBar
             ui={ui}
             compact={compactBuild}

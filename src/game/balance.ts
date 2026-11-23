@@ -34,16 +34,16 @@ export const PEON_TRAIN_WOOD = 0;
 export const BASE_PEON_CAP = 2;
 export const HOUSE_POP = 3;
 export const MAX_PEON_QUEUE = 4;
-/** Base keep army pop before midfield houses / churches (20 + 2 churches @ +15 = 50 max). */
-export const BASE_ARMY_CAP = 20;
+/** Base keep army pop before midfield houses / churches. A consecrated purple house or cathedral is +10 (house +5 and church +5). */
+export const BASE_ARMY_CAP = 40;
 /** Keep army slots before midfield houses / churches. */
 export function baseArmyCap(_lanes: LaneCount) {
   return BASE_ARMY_CAP;
 }
-/** Purple midfield house → military pop. */
+/** Purple midfield house → military pop. Stays after consecration and through cathedral. */
 export const MID_HOUSE_ARMY_POP = 5;
-/** Church (consecrated midfield house) → military pop. */
-export const CHURCH_ARMY_POP = 15;
+/** Church (consecrated midfield house) → military pop. Stacks with the purple-house bonus, including cathedrals. */
+export const CHURCH_ARMY_POP = 5;
 /** Purple midfield house → church. */
 export const CHURCH_UPGRADE_GOLD = 500;
 /** Purple midfield house → market. Sibling of consecration; the pad is one or the other. */

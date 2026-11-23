@@ -142,6 +142,7 @@ import {
   promoteRung,
 } from "./arena";
 import { doctrineStanceOf, foeBrainStats, notifyAiMatchEnd, notifyAiMatchStart, runAiTurn } from "./ai";
+import { resetDoctrineMemory } from "./doctrineAdapt";
 import { bestSelfPlayStyle, type AiStyle } from "./selfPlayBook";
 import { doctrineProfileForLanes, doctrineTune as savedDoctrineTune, type DoctrineTune } from "./doctrineTune";
 import type { ResourceBias } from "./doctrineAdapt";
@@ -152,6 +153,14 @@ import {
   computeWaveSpawnFormation,
   separateFriendlyUnits,
 } from "./formation";
+import {
+  companyIsPvp,
+  companySidePlans,
+  companyTiming,
+  companyUsable,
+  easyCpuTune,
+  type CompanySetup,
+} from "./company";
 import { arcadeSidePlans, arcadeTiming, waveStrengthScalar, type ArcadeDifficulty } from "./wavePlanner";
 import { saveHumanLog, type HumanBuildStep, type MatchTimelinePoint } from "./matchLog";
 import {
@@ -273,11 +282,15 @@ export class GameSim {
   private matchMode: "ai" | "pvp" | "arena" = "ai";
   /** Arcade only. Campaign and skirmish ignore this and keep the normal march. */
   private arcadeDifficulty: ArcadeDifficulty = "normal";
+  /** Company match. Null for arcade, campaign, and skirmish. */
+  private company: CompanySetup | null = null;
   private campaignMission: CampaignMission | null = null;
   private lastUnlock = "";
   /** True when the match that just ended was the first time that march was held. */
   private freshHold = false;
   private localTeam: Team = "you";
+  /** Subscribe-only client. Sees the host picture and never issues orders. */
+  private observer = false;
   private orderSink: ((order: RemoteOrder) => void) | null = null;
   private remoteNote: ((text: string) => void) | null = null;
   private applyingRemote = false;
@@ -498,17 +511,19 @@ export class GameSim {
         else return;
       }
     }
+    const prevLayer = s.defendLayer[team];
     s.defendLayer[team] = layer;
     const guardingCount = layer
       ? s.units.filter((u) => u.team === team && u.hp > 0 && u.fromBarracks && u.guardUnitId != null).length
       : 0;
-    if (team === this.localTeam) {
-      if (!layer) this.addToast("Standing down.");
+    const humanSide = !this.company || this.company.sides[team] !== "cpu";
+    if (prevLayer !== layer && humanSide) {
+      if (!layer) this.tell(team, "Standing down.");
       else {
         const label = defendLayerOptions(this.activeMap.seed).find((o) => o.id === layer)?.label ?? "orders";
         const guardNote =
           guardingCount > 0 ? ` (${guardingCount} escort${guardingCount === 1 ? "" : "s"} staying on guard)` : "";
-        this.addToast(`${label}.${guardNote}`);
+        this.tell(team, `${label}.${guardNote}`);
       }
     }
     if (layer) this.assignDefendRallies(team, layer, false, true);
@@ -816,6 +831,60 @@ export class GameSim {
     }
   }
 
+  /** Lobby agreement for a Company match. Copied so later edits cannot move a live game. */
+  setCompany(setup: CompanySetup) {
+    if (!companyUsable(setup)) return;
+    this.company = {
+      difficulty: setup.difficulty,
+      sides: { you: setup.sides.you, foe: setup.sides.foe },
+    };
+  }
+
+  clearCompany() {
+    this.company = null;
+    this.customDoctrineTune = { you: false, foe: false };
+    this.cpuStyle = { you: "reactive", foe: bestSelfPlayStyle() };
+  }
+
+  /** Easy CPU opponent spends less. Assistants and human keeps stay on today's builder. */
+  isFrugalCpu(team: Team) {
+    return this.company?.difficulty === "easy" && this.company.sides[team] === "cpu";
+  }
+
+  /** Body a human has Taken the Field in. The assistant must not order it. */
+  isDrivenUnit(id: number) {
+    const unit = this.state.units.find((u) => u.id === id);
+    return !!unit && this.isPlayerDriven(unit);
+  }
+
+  private applyCompanyDifficulty() {
+    if (!this.company) return;
+    const base = doctrineProfileForLanes(this.activeMap.lanes);
+    this.doctrineTune = { you: { ...base }, foe: { ...base } };
+    this.customDoctrineTune = { you: false, foe: false };
+    this.cpuStyle = { you: "reactive", foe: bestSelfPlayStyle() };
+    for (const team of ["you", "foe"] as const) {
+      const seat = this.company.sides[team];
+      if (seat === "human") continue;
+      this.cpuStyle[team] = "doctrine";
+      if (this.isFrugalCpu(team)) this.setDoctrineTune(easyCpuTune(base), team);
+    }
+  }
+
+  private activeWavePlans(waveNumber: number, lanes: number) {
+    if (this.company) return companySidePlans(waveNumber, lanes, this.company);
+    return arcadeSidePlans(waveNumber, lanes, this.enemyWaveDifficulty());
+  }
+
+  private activeTiming() {
+    if (this.company) return companyTiming(this.company);
+    return arcadeTiming(this.enemyWaveDifficulty());
+  }
+
+  private aiGoldFloor(team: Team) {
+    return AI_RESERVE + (this.isFrugalCpu(team) ? 80 : 0);
+  }
+
   /** Headless matches: the south keep runs the same commander as the north. */
   setBothCpu(on: boolean) {
     this.bothCpu = on;
@@ -861,6 +930,24 @@ export class GameSim {
 
   getLocalTeam() {
     return this.localTeam;
+  }
+
+  setObserver(on: boolean) {
+    this.observer = on;
+    if (!on) return;
+    this.orderSink = null;
+    this.state.possessedId = null;
+    this.state.buildSelection = null;
+    this.state.selectedUnitIds = [];
+    this.state.selectedVillagerIds = [];
+    this.state.selectedBuildingId = null;
+    this.state.selectedBuildingIds = [];
+    this.state.selectedKeepTeam = null;
+    this.possessKeys = { w: false, a: false, s: false, d: false };
+  }
+
+  isObserver() {
+    return this.observer;
   }
 
   setLocalPlayerId(id: string) {
@@ -1161,6 +1248,8 @@ export class GameSim {
   }
 
   reset() {
+    this.observer = false;
+    this.clearCompany();
     this.campaignMission = null;
     this.lastUnlock = "";
     this.freshHold = false;
@@ -1171,6 +1260,7 @@ export class GameSim {
   startCampaign(id: number) {
     const mission = missionById(id);
     if (!mission || missionStatus(id, loadCampaign()) === "locked") return false;
+    this.clearCompany();
     this.campaignMission = mission;
     this.lastUnlock = "";
     this.freshHold = false;
@@ -1235,6 +1325,22 @@ export class GameSim {
     this.freshHold = false;
     this.state.phase = "running";
     this.state.wavePhase = "build";
+    if (this.company) {
+      this.applyCompanyDifficulty();
+      const timing = companyTiming(this.company);
+      this.state.buildTimer = timing.opening;
+      this.resetHumanLog(false);
+      resetDoctrineMemory();
+      const head = this.company.difficulty === "easy" ? "Easy" : this.company.difficulty === "hard" ? "Hard" : "Normal";
+      if (companyIsPvp(this.company)) {
+        this.addToast(`Company — ${head}. Both keeps share the same march.`);
+        return;
+      }
+      notifyAiMatchStart();
+      const cpu = this.company.sides.foe === "cpu" ? "Red" : "Blue";
+      this.addToast(`Company ${head} — ${cpu} is the CPU. ${timing.opening}s until wave 1`);
+      return;
+    }
     const timing = arcadeTiming(this.enemyWaveDifficulty());
     this.state.buildTimer = timing.opening;
     if (this.matchMode === "pvp") {
@@ -1252,6 +1358,7 @@ export class GameSim {
 
   /** Local free-for-all gun game in an empty keep courtyard. */
   startArena() {
+    this.clearCompany();
     this.campaignMission = null;
     this.lastUnlock = "";
     this.freshHold = false;
@@ -1387,8 +1494,12 @@ export class GameSim {
     this.state.audioUnlocked = audioUnlocked;
     this.state.phase = "running";
     this.state.paused = this.linkDown;
+    if (this.company) {
+      this.applyCompanyDifficulty();
+      this.state.buildTimer = companyTiming(this.company).opening;
+    }
     if (this.localTeam !== team || this.state.commandTeam !== team || this.state.mapId !== map.id) return false;
-    this.addToast(`Skirmish — ${map.name}.`);
+    if (!this.observer) this.addToast(this.company ? `Company — ${map.name}.` : `Skirmish — ${map.name}.`);
     return true;
   }
 
@@ -1401,12 +1512,13 @@ export class GameSim {
   }
 
   togglePause() {
-    if (this.linkDown) return;
+    if (this.observer || this.linkDown) return;
     if (this.redirect({ t: "pause" })) return;
     this.state.paused = !this.state.paused;
   }
 
   toggleSpeed() {
+    if (this.observer) return;
     if (this.redirect({ t: "speed" })) return;
     if (this.state.possessedId != null) return;
     this.state.speed = this.state.speed === 1 ? 2 : 1;
@@ -1458,6 +1570,7 @@ export class GameSim {
    * to the host so both players can hop into their own troops.
    */
   tryPossess(id: number) {
+    if (this.observer) return false;
     const s = this.state;
     if (s.phase !== "running") return false;
     const u = s.units.find((x) => x.id === id);
@@ -1821,6 +1934,7 @@ export class GameSim {
   }
 
   selectBuild(kind: BuildingKind | null) {
+    if (this.observer) return;
     this.state.buildSelection = kind;
     this.setBuildingSelection(null);
     this.state.selectedVillagerIds = [];
@@ -1837,7 +1951,7 @@ export class GameSim {
   }
 
   click(hit: RectHit | null, world?: { x: number; y: number }) {
-    if (this.state.phase !== "running") return;
+    if (this.observer || this.state.phase !== "running") return;
     if (this.state.buildSelection === "barricade" && world) {
       this.placeBarricadeAt(world);
       return;
@@ -2018,6 +2132,7 @@ export class GameSim {
   }
 
   selectUnit(id: number, additive = false): boolean {
+    if (this.observer) return false;
     const u = this.state.units.find(
       (x) => x.id === id && x.team === this.localTeam && x.fromBarracks && x.hp > 0,
     );
@@ -2039,6 +2154,7 @@ export class GameSim {
   }
 
   selectUnitsByIds(ids: number[], additive = false): boolean {
+    if (this.observer) return false;
     const valid = new Set(
       this.state.units
         .filter((u) => u.team === this.localTeam && u.fromBarracks && u.hp > 0)
@@ -2106,6 +2222,7 @@ export class GameSim {
   }
 
   possessSelectedUnit(): boolean {
+    if (this.observer) return false;
     const s = this.state;
     if (s.phase !== "running" || this.matchMode === "arena" || s.arena) return false;
     for (const id of s.selectedUnitIds) {
@@ -2118,6 +2235,7 @@ export class GameSim {
   }
 
   private selectedSquad(team: Team, ids: number[]): Unit[] {
+    if (this.observer) return [];
     const byId = new Map<number, Unit>();
     for (const u of this.state.units) {
       if (u.team === team && u.fromBarracks && u.hp > 0 && !this.isPlayerDriven(u)) {
@@ -2492,6 +2610,7 @@ export class GameSim {
   }
 
   useControlGroup(slot: number, assign: boolean) {
+    if (this.observer) return false;
     if (assign) {
       if (this.state.selectedUnitIds.length > 0) {
         this.controlGroups.set(slot, { kind: "units", ids: [...this.state.selectedUnitIds] });
@@ -2609,6 +2728,7 @@ export class GameSim {
     hit: (RectHit | { kind: "barricade"; id: string }) | null,
     patrol = false,
   ) {
+    if (this.observer) return;
     const team = this.localTeam;
     const selected = this.peonsById(team, this.state.selectedVillagerIds);
     if (this.orderSink && !this.applyingRemote) {
@@ -2878,14 +2998,25 @@ export class GameSim {
     return alive + queued;
   }
 
-  /** Keep grants 20 base army slots; purple mid houses +5 each; churches +15 each (50 max with 2 churches). */
+  /**
+   * Keep grants 40 base army slots.
+   * A purple mid house adds +5, and that bonus stays after consecration and after the church becomes a cathedral.
+   * The church adds another +5, including cathedrals. A church that was never on a purple pad does not get the house bonus.
+   */
   armyCap(team: Team) {
-    const midHouses = this.state.buildings.filter(
-      (b) => b.team === team && b.kind === "house" && this.state.pads.find((p) => p.id === b.padId)?.zone === "midEco",
-    ).length;
-    const churches = this.state.buildings.filter((b) => b.team === team && b.kind === "church").length;
+    let midHouses = 0;
+    let churches = 0;
+    let stickyHouses = 0;
+    for (const b of this.state.buildings) {
+      if (b.team !== team) continue;
+      if (b.kind === "house" && this.isMidEcoPad(b.padId)) midHouses++;
+      else if (b.kind === "church") {
+        churches++;
+        if (this.isMidEcoPad(b.padId)) stickyHouses++;
+      }
+    }
     const lanes = mapLanes(this.activeMap.seed).length as 1 | 2 | 3;
-    return baseArmyCap(lanes) + midHouses * MID_HOUSE_ARMY_POP + churches * CHURCH_ARMY_POP;
+    return baseArmyCap(lanes) + (midHouses + stickyHouses) * MID_HOUSE_ARMY_POP + churches * CHURCH_ARMY_POP;
   }
 
   armySlotsUsed(team: Team) {
@@ -3344,7 +3475,9 @@ export class GameSim {
     if (Number.isFinite(cap)) {
       this.addToast(`Wave ${s.waveIndex}/${cap} — +${income}g`);
     } else {
-      const plan = arcadeSidePlans(s.waveIndex, 1, this.enemyWaveDifficulty()).foe;
+      const plans = this.activeWavePlans(s.waveIndex, 1);
+      const plan =
+        this.company?.sides.you === "cpu" && this.company.sides.foe !== "cpu" ? plans.you : plans.foe;
       this.addToast(`Wave ${s.waveIndex}: ${plan.theme} — +${income}g`);
     }
     this.addFloat(`+${income}`, s.keeps.you.pos.x - 30, s.keeps.you.pos.y - 40, "#8cd6ff");
@@ -3390,7 +3523,7 @@ export class GameSim {
       return;
     }
     s.wavePhase = "build";
-    s.buildTimer = arcadeTiming(this.enemyWaveDifficulty()).between;
+    s.buildTimer = this.activeTiming().between;
   }
 
   private enqueueWave(index: number) {
@@ -3431,7 +3564,7 @@ export class GameSim {
     const waveNumber = index + 1;
     // Arcade spawns a march for both keeps. Easy eases only the enemy roster.
     // Hard uses one roster for both sides. Timing follows the same difficulty.
-    const { you: youPlan, foe: foePlan } = arcadeSidePlans(waveNumber, lanes.length, this.enemyWaveDifficulty());
+    const { you: youPlan, foe: foePlan } = this.activeWavePlans(waveNumber, lanes.length);
     const laneBatches = lanes.map((lane) => {
       const youAnchor = { x: lanePathX(this.activeMap.seed, "you", lane, youY), y: youY };
       const foeAnchor = { x: lanePathX(this.activeMap.seed, "foe", lane, foeY), y: foeY };
@@ -7332,8 +7465,9 @@ export class GameSim {
     s.endReason = reason;
     s.won = won;
     if (this.matchMode === "pvp" || this.matchMode === "arena" || this.state.arena?.duel) return;
-    notifyAiMatchEnd(won);
-    this.flushHumanLog(reason, won);
+    const humanWon = this.company && won !== null && this.localTeam === "foe" ? !won : won;
+    notifyAiMatchEnd(humanWon);
+    this.flushHumanLog(reason, humanWon);
     this.freshHold = false;
     if (won === true && this.campaignMission) {
       const claimed = recordVictory(this.campaignMission.id);
@@ -7341,12 +7475,12 @@ export class GameSim {
       this.lastUnlock = claimed.unit ? unitPlural(claimed.unit) : "";
       if (this.lastUnlock) s.endReason = `${reason} ${this.lastUnlock} join your muster.`;
     }
-    if (won !== null) {
+    if (humanWon !== null) {
       const { gain, leveledUp } = awardMatchXp({
-        won,
-        slain: s.stats.you.slain,
+        won: humanWon,
+        slain: s.stats[this.company ? this.localTeam : "you"].slain,
         waves: s.waveIndex,
-        goldEarned: s.stats.you.goldEarned,
+        goldEarned: s.stats[this.company ? this.localTeam : "you"].goldEarned,
       });
       s.lastXpGain = gain;
       s.keepLevel = loadMeta().level;
@@ -7470,6 +7604,24 @@ export class GameSim {
     }
   }
 
+  /**
+   * Company CPU keeps and assistants. One commander per keep: economy, training,
+   * and army orders. Player-driven bodies are left out of the army orders.
+   */
+  private tickCompanyAi(dt: number) {
+    const setup = this.company;
+    if (!setup) return;
+    this.aiTimer -= dt;
+    if (this.aiTimer > 0) return;
+    for (const team of ["foe", "you"] as const) {
+      if (setup.sides[team] === "human") continue;
+      runAiTurn(this, AI_RESERVE, team, this.cpuStyle[team]);
+      if (this.cpuStyle[team] !== "doctrine") this.aiPickDefendLayer(team);
+    }
+    const iq = foeBrainStats().intellect;
+    this.aiTimer = Math.max(0.72, 1.85 - iq * 0.0115);
+  }
+
   update(rawDt: number) {
     const s = this.state;
     const rate = s.possessedId != null ? 1 : s.speed;
@@ -7489,11 +7641,12 @@ export class GameSim {
     this.updateResourceRegen(dt);
     this.tickWaves(dt);
 
-    if (this.matchMode === "ai") this.manageFoePeonDefense();
+    if ((!this.company && this.matchMode === "ai") || this.company?.sides.foe === "cpu") this.manageFoePeonDefense();
     this.updateVillagers(dt, "you");
     this.updateVillagers(dt, "foe");
 
-    if (this.matchMode === "ai") {
+    if (this.company) this.tickCompanyAi(dt);
+    else if (this.matchMode === "ai") {
       this.aiTimer -= dt;
       if (this.aiTimer <= 0) {
         runAiTurn(this, AI_RESERVE, "foe", this.cpuStyle.foe);
@@ -7730,7 +7883,7 @@ export class GameSim {
 
   aiCoordinateRush(skill: number, team: Team = "foe") {
     const held = this.state.units.filter(
-      (u) => u.team === team && u.fromBarracks && u.aiHeldForRush && u.hp > 0,
+      (u) => u.team === team && u.fromBarracks && u.aiHeldForRush && u.hp > 0 && !this.isPlayerDriven(u),
     );
     if (held.length === 0) {
       this.aiRushDeadline[team] = 0;
@@ -7787,7 +7940,7 @@ export class GameSim {
       const kennel = towers.find((b) => b.kind === "ballista" && b.rateRank < 2);
       if (kennel) {
         const cost = UPGRADE_COST[kennel.rateRank];
-        if (this.state.gold[team] >= cost + AI_RESERVE) {
+        if (this.state.gold[team] >= cost + this.aiGoldFloor(team)) {
           this.spend(team, cost);
           kennel.rateRank = (kennel.rateRank + 1) as 1 | 2;
           kennel.spent += cost;
@@ -7815,7 +7968,7 @@ export class GameSim {
       if (!tower) return false;
       const rank = kind === "damage" ? tower.damageRank : tower.rateRank;
       const cost = UPGRADE_COST[rank];
-      if (this.state.gold[team] < cost + AI_RESERVE) return false;
+      if (this.state.gold[team] < cost + this.aiGoldFloor(team)) return false;
       this.spend(team, cost);
       if (kind === "damage") tower.damageRank = (tower.damageRank + 1) as 1 | 2;
       else tower.rateRank = (tower.rateRank + 1) as 1 | 2;
@@ -7930,7 +8083,7 @@ export class GameSim {
     const train = this.campaignMission?.unit ?? kind;
     const def = UNIT_DEFS[train];
     const cost: ResCost = { gold: def.cost ?? 30, wood: def.woodCost ?? 0 };
-    if (this.state.gold[team] < cost.gold + AI_RESERVE) return false;
+    if (this.state.gold[team] < cost.gold + this.aiGoldFloor(team)) return false;
     if (this.state.wood[team] < cost.wood) return false;
     const bars = this.state.buildings
       .filter((b) => b.team === team && b.kind === "barracks")
@@ -7972,7 +8125,7 @@ export class GameSim {
     if (bars.every((b) => b.queue.length >= 3)) return false;
     const gold = this.state.gold[team];
     const wood = this.state.wood[team];
-    if (gold < AI_RESERVE + 28) return false;
+    if (gold < this.aiGoldFloor(team) + 28) return false;
     const observed = this.aiObservedHumanUnits(430, team);
     const enemy = this.enemyOf(team);
     const yourTowers = this.state.buildings.filter(
@@ -8011,7 +8164,7 @@ export class GameSim {
 
     for (const kind of candidates) {
       const def = UNIT_DEFS[kind];
-      if (gold >= (def.cost ?? 30) + AI_RESERVE && wood >= (def.woodCost ?? 0)) {
+      if (gold >= (def.cost ?? 30) + this.aiGoldFloor(team) && wood >= (def.woodCost ?? 0)) {
         if (this.aiEnqueueTrain(kind, team)) return true;
       }
     }
@@ -8394,6 +8547,12 @@ export class GameSim {
       },
       lastDriven: Object.fromEntries(this.lastDriven),
       defendLayer: { you: s.defendLayer.you, foe: s.defendLayer.foe },
+      company: this.company
+        ? {
+            difficulty: this.company.difficulty,
+            sides: { you: this.company.sides.you, foe: this.company.sides.foe },
+          }
+        : undefined,
       finalDuel: s.finalDuel
         ? {
             phase: s.finalDuel.phase,
@@ -8500,6 +8659,12 @@ export class GameSim {
   }
 
   private copySnapshot(snap: MatchSnapshot) {
+    if (snap.company && companyUsable(snap.company)) {
+      this.company = {
+        difficulty: snap.company.difficulty,
+        sides: { you: snap.company.sides.you, foe: snap.company.sides.foe },
+      };
+    }
     this.pendingTrain.clear();
     const s = this.state;
     const mapChanged = snap.mapId !== s.mapId;
@@ -8793,8 +8958,9 @@ export class GameSim {
     s.soundOn = soundOn;
     s.audioUnlocked = audioUnlocked;
     s.hoveredPadId = hoveredPadId;
-    const drivenId =
-      snap.drivenBy?.[this.localPlayerId] ?? snap.driven?.[this.localTeam] ?? prevPossessed;
+    const drivenId = this.observer
+      ? null
+      : (snap.drivenBy?.[this.localPlayerId] ?? snap.driven?.[this.localTeam] ?? prevPossessed);
     const drivenBody = drivenId != null ? s.units.find((u) => u.id === drivenId && u.team === this.localTeam && u.hp > 0) : undefined;
     s.possessedId = drivenBody?.id ?? null;
     if (drivenBody) {
@@ -9157,7 +9323,23 @@ export class GameSim {
     const brain = foeBrainStats();
     const body = s.possessedId != null ? s.units.find((u) => u.id === s.possessedId && u.hp > 0) : undefined;
     let endReason = s.endReason;
-    if (view === "foe" && s.phase === "ended") {
+    if (this.observer && s.phase === "ended") {
+      if (s.won === true) {
+        endReason = s.endReason.includes("stone")
+          ? "Blue held. The south keep stands stronger."
+          : s.endReason.includes("Final Duel")
+            ? "Blue wins the Final Duel."
+            : s.endReason.includes("march")
+              ? "Blue held the march."
+              : "Blue wins. The north keep is broken.";
+      } else if (s.won === false) {
+        endReason = s.endReason.includes("stone")
+          ? "Red held. The north keep stands stronger."
+          : s.endReason.includes("Final Duel")
+            ? "Red wins the Final Duel."
+            : "Red wins. The south keep is broken.";
+      }
+    } else if (view === "foe" && s.phase === "ended") {
       if (s.endReason.includes("Final Duel")) {
         endReason = s.won ? "Defeat. Final Duel." : "Victory. Final Duel.";
       } else if (s.won === true) {
@@ -9180,7 +9362,7 @@ export class GameSim {
         ? ""
         : this.campaignMission
           ? this.campaignMission.title
-          : arcadeSidePlans(s.waveIndex > 0 ? s.waveIndex : 1, 1, this.enemyWaveDifficulty()).foe.theme;
+          : this.activeWavePlans(s.waveIndex > 0 ? s.waveIndex : 1, 1)[view === "you" ? "foe" : "you"].theme;
     return {
       phase: s.phase,
       mapId: s.mapId,
@@ -9211,14 +9393,14 @@ export class GameSim {
         s.phase === "running",
       totalWaves: Number.isFinite(cap) ? cap : 0,
       toasts: s.toasts.map((t) => t.text),
-      buildSelection: s.buildSelection,
+      buildSelection: this.observer ? null : s.buildSelection,
       selectedBuildingId: selected?.id ?? null,
       selectedBuildingTeam: selected?.team ?? null,
       selectedBuildingKind: selected?.kind ?? null,
       selectedBarracksCount: selectedHalls.length,
       selectedKeepTeam: s.selectedKeepTeam,
       selectedPeonCount: s.selectedVillagerIds.length,
-      selectedArmy: this.buildSelectedArmyUi(view),
+      selectedArmy: this.observer ? null : this.buildSelectedArmyUi(view),
       selectedRanks: selected ? { damage: selected.damageRank + 1, rate: selected.rateRank + 1 } : null,
       selectedCanUpgradeDamage: canUpgradeStructure && selected!.damageRank < 2,
       selectedCanUpgradeRate: canUpgradeStructure && selected!.rateRank < 2,
@@ -9293,12 +9475,25 @@ export class GameSim {
       foeLastAction: brain.lastAction,
       localTeam: view,
       pvp: this.matchMode === "pvp",
+      observer: this.observer,
+      blueGold: Math.floor(s.gold.you),
+      blueWood: Math.floor(s.wood.you),
+      blueArmy: this.armySlotsUsed("you"),
+      blueArmyCap: this.armyCap("you"),
+      blueKeep: Math.max(0, Math.ceil(s.keeps.you.hp)),
+      blueKeepMax: s.keeps.you.maxHp,
+      redGold: Math.floor(s.gold.foe),
+      redWood: Math.floor(s.wood.foe),
+      redArmy: this.armySlotsUsed("foe"),
+      redArmyCap: this.armyCap("foe"),
+      redKeep: Math.max(0, Math.ceil(s.keeps.foe.hp)),
+      redKeepMax: s.keeps.foe.maxHp,
       playerWins: meta.wins,
       missionId: this.campaignMission?.id ?? null,
       missionName: this.campaignMission?.nation ?? "",
       freshUnlock: this.lastUnlock,
       freshHold: this.freshHold,
-      fieldSite: this.fieldSiteUi(view),
+      fieldSite: this.observer ? null : this.fieldSiteUi(view),
       marketQuotes: { ...s.market[view] },
       selectedCanRaiseMarket:
         !!selected &&
@@ -9307,7 +9502,9 @@ export class GameSim {
         this.isMidEcoPad(selected.padId) &&
         s.gold[view] >= MARKET_UPGRADE_GOLD &&
         s.wood[view] >= MARKET_UPGRADE_WOOD,
-      possessed: body
+      possessed: this.observer
+        ? null
+        : body
         ? {
             id: body.id,
             kind: body.kind,
@@ -9348,11 +9545,13 @@ export class GameSim {
             youLife: s.finalDuel.life[view],
             foeLife: s.finalDuel.life[other],
             canPropose:
+              !this.observer &&
               this.matchMode === "pvp" &&
               s.phase === "running" &&
               s.finalDuel.phase === "off" &&
               !s.arena?.duel,
             canAccept:
+              !this.observer &&
               this.matchMode === "pvp" &&
               s.phase === "running" &&
               s.finalDuel.phase === "proposed" &&

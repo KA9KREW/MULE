@@ -660,6 +660,20 @@ export interface UiSnapshot {
   /** Side this screen commands. Guest is `foe` while the map stays north-up. */
   localTeam: Team;
   pvp: boolean;
+  /** Subscribe-only view. Gold and keeps below are absolute: Blue is south, Red is north. */
+  observer: boolean;
+  blueGold: number;
+  blueWood: number;
+  blueArmy: number;
+  blueArmyCap: number;
+  blueKeep: number;
+  blueKeepMax: number;
+  redGold: number;
+  redWood: number;
+  redArmy: number;
+  redArmyCap: number;
+  redKeep: number;
+  redKeepMax: number;
   /** Persistent player win count for the keep tug badge. */
   playerWins: number;
   /** Set while a Ten Marches mission is the live match. */

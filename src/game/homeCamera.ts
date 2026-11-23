@@ -23,6 +23,21 @@ export function homeCameraFrame(team: Team) {
   };
 }
 
+/**
+ * Oblique frame of the whole valley for a commentator.
+ * Look sits near midfield so both keeps start in view. Pan and zoom still use the free camera.
+ */
+export function fieldCameraFrame() {
+  return {
+    yaw: 0,
+    pitch: 0.72,
+    dist: 1320,
+    lookX: 0,
+    lookY: 20,
+    lookZ: 70,
+  };
+}
+
 /** Camera sits on the home side of the keep: +Z is south, −Z is north. */
 export function homeCameraZ(team: Team) {
   const frame = homeCameraFrame(team);

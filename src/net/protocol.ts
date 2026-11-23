@@ -1,3 +1,5 @@
+import type { CompanySetup } from "../game/company";
+import { companyUsable } from "../game/company";
 import { skirmishMap } from "../game/map";
 import type {
   BuildingKind,
@@ -236,6 +238,11 @@ export interface MatchSnapshot {
   market?: Record<Team, { woodBuy: number; woodSell: number; goldBuy: number; goldSell: number }>;
   /** Last soldier each player took the field in. Used when they are not fielded at spawn. */
   lastDriven?: Record<string, number>;
+  /**
+   * Company lobby agreement: difficulty and who runs each keep.
+   * Absent on skirmish and arcade pictures.
+   */
+  company?: CompanySetup;
   /** Skirmish Final Duel status. */
   finalDuel?: {
     phase: "off" | "proposed" | "active";
@@ -250,7 +257,18 @@ export interface MatchSnapshot {
 
 /** Host + guests in a room. Auto-balanced across the two keeps. */
 export const MAX_SKIRMISH_PLAYERS = 6;
+/**
+ * Subscribe-only peers on the same host connection.
+ * They are not seats: Company still refuses a third player, and a full skirmish
+ * still refuses a seventh player. Three observers is the room cap on top of that.
+ */
+export const MAX_OBSERVERS = 3;
 export const HOST_PLAYER_ID = "host";
+
+export interface WatcherSeat {
+  id: string;
+  name: string;
+}
 
 export interface RosterSeat {
   id: string;
@@ -265,18 +283,27 @@ export function pickBalancedTeam(seats: RosterSeat[]): Team {
 }
 
 export type NetMsg =
-  | { t: "hello"; name: string; playerId: string }
+  | { t: "hello"; name: string; playerId: string; watch?: boolean }
   | { t: "roster"; players: RosterSeat[] }
-  | { t: "start"; map: MapDef; team: Team; playerId: string }
+  /** Guest asks to leave a seat and subscribe. Host refuses when observers are closed. */
+  | { t: "observe" }
+  /** Host tells that peer they are subscribed and hold no keep. */
+  | { t: "watching" }
+  /** Host starts the match for a subscriber. No team, no orders. */
+  | { t: "watch"; map: MapDef; company?: CompanySetup }
+  | { t: "rewatch"; mapId: string; company?: CompanySetup }
+  | { t: "company"; difficulty: CompanySetup["difficulty"]; sides: CompanySetup["sides"] }
+  | { t: "seat"; team: Team }
+  | { t: "start"; map: MapDef; team: Team; playerId: string; company?: CompanySetup }
   | { t: "pick"; mapId: string }
-  | { t: "rematch"; mapId: string; team: Team; playerId: string }
+  | { t: "rematch"; mapId: string; team: Team; playerId: string; company?: CompanySetup }
   | { t: "order"; playerId: string; order: RemoteOrder }
   | { t: "snap"; snap: MatchSnapshot }
   | { t: "note"; text: string }
   | { t: "chat"; playerId: string; name: string; team: Team; text: string; emote?: string }
   | { t: "ping"; n: number; at: number }
   | { t: "pong"; n: number; at: number }
-  | { t: "full" }
+  | { t: "full"; reason?: string }
   | { t: "part"; id: number; i: number; n: number; s: string };
 
 const ORDER_TYPES = new Set<RemoteOrder["t"]>([
@@ -346,6 +373,13 @@ export function inviteLink(roomId: string) {
   return url.href;
 }
 
+/** Same room as the player invite. `watch=1` subscribes instead of sitting. */
+export function observerLink(roomId: string) {
+  const url = new URL(inviteLink(roomId));
+  url.searchParams.set("watch", "1");
+  return url.href;
+}
+
 export function parseRoomInput(raw: string) {
   const text = raw.trim();
   if (!text) return "";
@@ -372,7 +406,21 @@ export function asNetMsg(data: unknown): NetMsg | null {
   if (t === "hello") {
     const name = (data as { name?: unknown }).name;
     const playerId = (data as { playerId?: unknown }).playerId;
+    const watch = (data as { watch?: unknown }).watch;
     if (typeof name !== "string" || typeof playerId !== "string" || !playerId) return null;
+    if (watch != null && typeof watch !== "boolean") return null;
+  }
+  if (t === "watch") {
+    const map = (data as { map?: unknown }).map;
+    const company = (data as { company?: unknown }).company;
+    if (!map || typeof map !== "object") return null;
+    if (company != null && !companyUsable(company)) return null;
+  }
+  if (t === "rewatch") {
+    const mapId = (data as { mapId?: unknown }).mapId;
+    const company = (data as { company?: unknown }).company;
+    if (typeof mapId !== "string" || !skirmishMap(mapId)) return null;
+    if (company != null && !companyUsable(company)) return null;
   }
   if (t === "roster") {
     const players = (data as { players?: unknown }).players;
@@ -381,8 +429,22 @@ export function asNetMsg(data: unknown): NetMsg | null {
   if (t === "start" || t === "rematch") {
     const team = (data as { team?: unknown }).team;
     const playerId = (data as { playerId?: unknown }).playerId;
+    const company = (data as { company?: unknown }).company;
     if (team !== "you" && team !== "foe") return null;
     if (typeof playerId !== "string" || !playerId) return null;
+    if (company != null && !companyUsable(company)) return null;
+  }
+  if (t === "company") {
+    const msg = data as { difficulty?: unknown; sides?: unknown };
+    if (!companyUsable({ difficulty: msg.difficulty, sides: msg.sides })) return null;
+  }
+  if (t === "seat") {
+    const team = (data as { team?: unknown }).team;
+    if (team !== "you" && team !== "foe") return null;
+  }
+  if (t === "full") {
+    const reason = (data as { reason?: unknown }).reason;
+    if (reason != null && typeof reason !== "string") return null;
   }
   if (t === "part") {
     const part = data as { id?: unknown; i?: unknown; n?: unknown; s?: unknown };
@@ -406,6 +468,12 @@ export function asNetMsg(data: unknown): NetMsg | null {
   if (
     t === "hello" ||
     t === "roster" ||
+    t === "observe" ||
+    t === "watching" ||
+    t === "watch" ||
+    t === "rewatch" ||
+    t === "company" ||
+    t === "seat" ||
     t === "start" ||
     t === "pick" ||
     t === "rematch" ||
@@ -445,6 +513,7 @@ export function snapshotUsable(snap: unknown): snap is MatchSnapshot {
   if (!keepUsable(s.keeps?.you) || !keepUsable(s.keeps?.foe)) return false;
   if (!Array.isArray(s.units) || !Array.isArray(s.villagers) || !Array.isArray(s.buildings)) return false;
   if (!Array.isArray(s.nodes) || !Array.isArray(s.barricades) || !Array.isArray(s.pads)) return false;
+  if (s.company != null && !companyUsable(s.company)) return false;
   return true;
 }
 

@@ -39,7 +39,7 @@ const STRUCTURE_ROLE: Partial<Record<BuildingKind, string>> = {
   ballista: "Armor-piercing bolts at a fixed rate. Upgrade posts guard dogs that kill spies on the pad.",
   catapult: "Splash that stays strong at the gate and breaks barricades.",
   barricade: "A peon blocks one road. Melee has to chop it. A ram smashes it.",
-  church: `Upgraded purple house. Blessing aura (+25% damage, regen), +${CHURCH_ARMY_POP} army pop. Free soldier every 10s, templar knight every 60s.`,
+  church: `Upgraded purple house. Blessing aura (+25% damage, regen), +${MID_HOUSE_ARMY_POP} purple-house army pop and +${CHURCH_ARMY_POP} church army pop. Both stick through cathedral. Free soldier every 10s, templar knight every 60s.`,
 };
 
 function costLabel(gold: number, wood: number) {
@@ -370,8 +370,9 @@ export function DetailSheet({
       <div className="detail-body">
       {isHouse && (
         <p className="detail-note">
-          Yard houses add +{HOUSE_POP} peon pop. Purple midfield houses add +{MID_HOUSE_ARMY_POP} army pop and can consecrate into a church (+{CHURCH_ARMY_POP} army pop) for 500g.
-          Keep grants {BASE_ARMY_CAP} base army slots (up to {BASE_ARMY_CAP + 2 * CHURCH_ARMY_POP} max with 2 churches).
+          Yard houses add +{HOUSE_POP} peon pop. A purple midfield house adds +{MID_HOUSE_ARMY_POP} army pop. That bonus stays when the house is consecrated and when that church is raised to a cathedral.
+          Consecrating it also adds +{CHURCH_ARMY_POP} army pop (500g).
+          Keep grants {BASE_ARMY_CAP} base army slots ({BASE_ARMY_CAP} / {BASE_ARMY_CAP + MID_HOUSE_ARMY_POP + CHURCH_ARMY_POP} / {BASE_ARMY_CAP + 2 * (MID_HOUSE_ARMY_POP + CHURCH_ARMY_POP)} with 0 / 1 / 2 churches or cathedrals).
         </p>
       )}
       {isHouse && !isEnemy && ui.selectedIsMidHouse && (
@@ -442,7 +443,7 @@ export function DetailSheet({
       {isChurch && !ui.selectedIsCathedral && <p className="detail-note">{STRUCTURE_ROLE.church}</p>}
       {isChurch && ui.selectedIsCathedral && (
         <p className="detail-note">
-          Cathedral. Blessing aura (+25% damage, regen), +{CHURCH_ARMY_POP} army pop. Free soldier every 10s, free
+          Cathedral. Blessing aura (+25% damage, regen). The purple-house +{MID_HOUSE_ARMY_POP} and the church +{CHURCH_ARMY_POP} army pop both remain. Free soldier every 10s, free
           templar every 60s. Queue more templars below.
         </p>
       )}

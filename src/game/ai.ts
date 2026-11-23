@@ -200,6 +200,7 @@ function doctrineCommander(sim: GameSim, team: Team) {
       keepHpRatio,
       enemyKeepHpRatio,
       currentLayer: state.defendLayer[team],
+      frugal: sim.isFrugalCpu(team),
     },
     profile,
   );
@@ -248,7 +249,7 @@ function doctrineCommander(sim: GameSim, team: Team) {
       if (ballistas.length < plan.wantBallistas) sim.placeAiBuilding("ballista", 0, team);
       else if (catapults.length < plan.wantCatapults) sim.placeAiBuilding("catapult", 0, team);
       else if (churches >= 1 && barracks < plan.wantBarracks) sim.placeAiBuilding("barracks", 0, team);
-      else if (churches >= 1 && barracks < 3 && freeGold >= 220 && freeWood >= 140) {
+      else if (!sim.isFrugalCpu(team) && churches >= 1 && barracks < 3 && freeGold >= 220 && freeWood >= 140) {
         sim.placeAiBuilding("barracks", 0, team);
       }
     }

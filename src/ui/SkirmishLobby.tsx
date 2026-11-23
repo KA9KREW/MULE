@@ -1,5 +1,5 @@
-import type { RosterSeat } from "../net/protocol";
-import { MAX_SKIRMISH_PLAYERS } from "../net/protocol";
+import type { RosterSeat, WatcherSeat } from "../net/protocol";
+import { MAX_OBSERVERS, MAX_SKIRMISH_PLAYERS } from "../net/protocol";
 import type { Team } from "../game/types";
 
 interface SkirmishEndProps {
@@ -12,6 +12,7 @@ interface SkirmishEndProps {
   onPick: (mapId: string) => void;
   onRematch: () => void;
   onLeave: () => void;
+  watching?: boolean;
 }
 
 function roadsLabel(lanes: number) {
@@ -28,12 +29,15 @@ export function SkirmishEnd({
   onPick,
   onRematch,
   onLeave,
+  watching = false,
 }: SkirmishEndProps) {
   const selected = maps.find((map) => map.id === mapId) ?? maps[0];
   return (
     <div className="skirmish-end" role="dialog" aria-label="Match over">
       <h2>{result}</h2>
-      {role === "host" ? (
+      {watching ? (
+        linkDown ? <p className="skirmish-end-down">Connection lost.</p> : null
+      ) : role === "host" ? (
         <div className="map-picks" role="listbox" aria-label="Rematch map">
           {maps.map((map) => (
             <button
@@ -52,15 +56,15 @@ export function SkirmishEnd({
       ) : (
         <p>Waiting for host</p>
       )}
-      {selected && role === "host" && <p className="skirmish-end-map">{selected.tagline}</p>}
-      {selected && role !== "host" && (
+      {!watching && selected && role === "host" && <p className="skirmish-end-map">{selected.tagline}</p>}
+      {!watching && selected && role !== "host" && (
         <p className="skirmish-end-map">
           {selected.name} · {roadsLabel(selected.lanes)}
           <span>{selected.tagline}</span>
         </p>
       )}
-      {role === "host" && linkDown && <p className="skirmish-end-down">Connection lost.</p>}
-      {role === "host" && (
+      {!watching && role === "host" && linkDown && <p className="skirmish-end-down">Connection lost.</p>}
+      {!watching && role === "host" && (
         <button type="button" className="cta" onClick={onRematch} disabled={!canRematch}>
           Rematch
         </button>
@@ -92,6 +96,15 @@ interface SkirmishLobbyProps {
   onShare: () => void;
   onStart: () => void;
   onLeave: () => void;
+  allowObservers: boolean;
+  watchers: WatcherSeat[];
+  watching: boolean;
+  pendingWatch: boolean;
+  copiedWatch: boolean;
+  onAllowObservers: (on: boolean) => void;
+  onObserve: () => void;
+  onObserveJoin: () => void;
+  onCopyWatch: () => void;
 }
 
 function TeamColumn({
@@ -140,6 +153,15 @@ export function SkirmishLobby({
   onShare,
   onLeave,
   onStart,
+  allowObservers,
+  watchers,
+  watching,
+  pendingWatch,
+  copiedWatch,
+  onAllowObservers,
+  onObserve,
+  onObserveJoin,
+  onCopyWatch,
 }: SkirmishLobbyProps) {
   const canShare = typeof navigator !== "undefined" && typeof navigator.share === "function";
   const south = players.filter((p) => p.team === "you");
@@ -149,7 +171,8 @@ export function SkirmishLobby({
     <div className="overlay title-overlay skirmish-lobby">
       <h1>Skirmish</h1>
       <p>
-        Up to {MAX_SKIRMISH_PLAYERS} players. Teams auto-balance — south keep vs north keep.
+        Up to {MAX_SKIRMISH_PLAYERS} players. Teams auto-balance — south keep vs north keep. Observers do not
+        take a seat. Up to {MAX_OBSERVERS} can watch.
       </p>
 
       <label className="lobby-label">
@@ -183,6 +206,9 @@ export function SkirmishLobby({
           <button type="button" className="ghost" onClick={onJoin} disabled={!joinDraft.trim()}>
             Join
           </button>
+          <button type="button" className="ghost" onClick={onObserveJoin} disabled={!joinDraft.trim()}>
+            Observe
+          </button>
         </>
       )}
 
@@ -192,7 +218,7 @@ export function SkirmishLobby({
             <TeamColumn title={`South · ${south.length}`} seats={south} localPlayerId={localPlayerId} />
             <TeamColumn title={`North · ${north.length}`} seats={north} localPlayerId={localPlayerId} />
           </div>
-          {role === "guest" && link === "open" && (
+          {role === "guest" && link === "open" && !watching && !pendingWatch && (
             <p className="lobby-seat">
               You are on the {localTeam === "you" ? "south" : "north"} keep.
             </p>
@@ -202,10 +228,26 @@ export function SkirmishLobby({
 
       {role === "host" && invite && (
         <>
+          <label className="lobby-watch">
+            <input
+              type="checkbox"
+              checked={allowObservers}
+              onChange={(ev) => onAllowObservers(ev.target.checked)}
+            />
+            Allow observers
+          </label>
           <p className="lobby-stay">
             Share the link. New players sit on the smaller team. Start when both keeps have at least one
-            player.
+            player. Observers use the observer link and cannot give orders.
           </p>
+          {allowObservers && invite && (
+            <button type="button" className="ghost" onClick={onCopyWatch}>
+              {copiedWatch ? "Observer link copied" : "Copy observer link"}
+            </button>
+          )}
+          {watchers.length > 0 && (
+            <p className="lobby-status">Observing: {watchers.map((w) => w.name).join(", ")}</p>
+          )}
           <input className="lobby-field" readOnly value={invite} onFocus={(ev) => ev.currentTarget.select()} />
           {canShare && (
             <button type="button" className="cta" onClick={onShare}>
@@ -221,7 +263,15 @@ export function SkirmishLobby({
         </>
       )}
 
-      {role === "guest" && link === "open" && <p>Waiting for host to start</p>}
+      {role === "guest" && link === "open" && !watching && !pendingWatch && (
+        <button type="button" className="ghost" onClick={onObserve}>
+          Observe instead of playing
+        </button>
+      )}
+      {(watching || pendingWatch) && (
+        <p>{watching ? "Observing. You have no keep and cannot give orders." : "Asking to observe."}</p>
+      )}
+      {role === "guest" && link === "open" && !watching && !pendingWatch && <p>Waiting for host to start</p>}
 
       {status && <p className="lobby-status">{status}</p>}
 

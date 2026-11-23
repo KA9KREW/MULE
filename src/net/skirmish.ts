@@ -1,5 +1,6 @@
 import Peer, { type DataConnection, type PeerError } from "peerjs";
 import {
+  MAX_OBSERVERS,
   MAX_SKIRMISH_PLAYERS,
   asNetMsg,
   createRoomId,
@@ -76,6 +77,8 @@ export class SkirmishLink {
   private partId = 1;
   private parts = new WireReassembly();
   private rejected = false;
+  /** Guest already heard "full" — a following close is not a dropped host. */
+  private sawFull = false;
   private ignored = new Set<DataConnection>();
 
   constructor(private events: SkirmishEvents) {
@@ -115,6 +118,19 @@ export class SkirmishLink {
 
   guestCount() {
     return this.guests.size;
+  }
+
+  /** Close one guest without treating it as the match ending. */
+  dropGuest(peerId: string) {
+    const conn = this.guests.get(peerId);
+    if (!conn) return;
+    this.ignored.add(conn);
+    this.guests.delete(peerId);
+    try {
+      conn.close();
+    } catch {
+      /* already gone */
+    }
   }
 
   private push(conn: DataConnection | null | undefined, msg: NetMsg) {
@@ -180,6 +196,7 @@ export class SkirmishLink {
     this.awaySince = 0;
     this.awayHiddenAt = 0;
     this.guestTried = false;
+    this.sawFull = false;
     this.deadlineAt = 0;
     this.hidden = typeof document !== "undefined" && document.visibilityState === "hidden";
     this.lostGen = -1;
@@ -277,10 +294,14 @@ export class SkirmishLink {
 
   private accept(conn: DataConnection) {
     if (this.role !== "host") return;
-    if (this.guests.size >= MAX_GUESTS || this.guests.has(conn.peer)) {
+    const cap = MAX_GUESTS + MAX_OBSERVERS;
+    if (this.guests.size >= cap || this.guests.has(conn.peer)) {
       conn.on("open", () => {
         try {
-          conn.send({ t: "full" });
+          conn.send({
+            t: "full",
+            reason: `This room is full (${MAX_SKIRMISH_PLAYERS} players and ${MAX_OBSERVERS} observers).`,
+          });
         } catch {
           /* ignore */
         }
@@ -336,9 +357,6 @@ export class SkirmishLink {
       if (this.guests.get(peerId) !== conn) return;
       this.guests.delete(peerId);
       this.events.onGuestDisconnected?.(peerId);
-      if (this.guests.size === 0 && this.opened && !this.closed) {
-        this.events.onDown("All guests disconnected.");
-      }
     });
   }
 
@@ -377,7 +395,7 @@ export class SkirmishLink {
       if (!this.opened) this.onTransportLost(gen);
     });
     conn.on("close", () => {
-      if (this.ignored.has(conn)) return;
+      if (this.ignored.has(conn) || this.sawFull) return;
       if (this.closed || this.conn !== conn) return;
       if (!this.opened) {
         this.onTransportLost(gen);
@@ -522,7 +540,10 @@ export class SkirmishLink {
       return;
     }
     if (msg.t === "full") {
-      this.events.onStatus("This match is full (6 players).");
+      this.sawFull = true;
+      this.stopped = true;
+      this.clearTimers();
+      this.events.onDirectFail(msg.reason?.trim() || "This match is full.");
       return;
     }
     this.events.onMessage(msg, fromPeerId);

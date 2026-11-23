@@ -20,7 +20,7 @@ import {
   WORLD_W,
 } from "./balance";
 import { ARENA_HALF, arenaCameraFrame, buildArenaCourtyardModel } from "./arena";
-import { homeCameraFrame } from "./homeCamera";
+import { fieldCameraFrame, homeCameraFrame } from "./homeCamera";
 import { mapBounds } from "./map";
 import { cloneModel, ensureModelsLoaded, setSharedAnisotropy } from "./assets3d";
 import { buildSkyEnvironment } from "./skyEnvironment";
@@ -244,6 +244,8 @@ export class GameRenderer {
   private lastMapId = "";
   /** Gun-game courtyard — frame the yard, hide keeps. */
   private arenaView = false;
+  /** Commentator frame: the whole field, not one keep. Left-drag pans. */
+  private fieldView = false;
   private worldGroup = new THREE.Group();
   private torchLights: THREE.PointLight[] = [];
   private sun: THREE.DirectionalLight;
@@ -707,11 +709,14 @@ export class GameRenderer {
   /** Best default RTS framing — oblique, on the local keep's side of the map. */
   resetCamera() {
     this.camGlide = null;
-    const frame = this.arenaView ? arenaCameraFrame() : homeCameraFrame(this.homeSide);
+    const frame = this.arenaView
+      ? arenaCameraFrame()
+      : this.fieldView
+        ? fieldCameraFrame()
+        : homeCameraFrame(this.homeSide);
     // Pull back a little on wide maps so the outer roads start in view.
-    this.camDist = this.arenaView
-      ? frame.dist
-      : frame.dist * Math.sqrt(Math.max(1, this.mapWidth / WORLD_W));
+    const wide = Math.sqrt(Math.max(1, this.mapWidth / WORLD_W));
+    this.camDist = this.arenaView ? frame.dist : Math.min(this.camDistMax, frame.dist * wide);
     this.camYaw = frame.yaw;
     this.camPitch = frame.pitch;
     this.camLook.set(frame.lookX, frame.lookY, frame.lookZ);
@@ -857,7 +862,18 @@ export class GameRenderer {
   /** North keep for the guest. Does not flip the map. */
   setHomeSide(team: Team) {
     this.homeSide = team;
+    this.fieldView = false;
     this.resetCamera();
+  }
+
+  isFieldView() {
+    return this.fieldView;
+  }
+
+  /** Frame both keeps. R returns here until a player home side is set. */
+  setFieldView(on: boolean) {
+    this.fieldView = on;
+    if (on) this.resetCamera();
   }
 
   zoomBy(factor: number) {
@@ -1084,9 +1100,9 @@ export class GameRenderer {
       const travel = Math.hypot(ev.clientX - prev.ox, ev.clientY - prev.oy);
       if (travel <= threshold) return;
       if (touch) {
-        this.dragMode = this.touchDragMode === "select" ? "select" : "orbit";
+        this.dragMode = this.fieldView ? "pan" : this.touchDragMode === "select" ? "select" : "orbit";
       } else {
-        this.dragMode = this.pointerButton === 0 ? "select" : "orbit";
+        this.dragMode = this.pointerButton === 0 ? (this.fieldView ? "pan" : "select") : "orbit";
       }
       this.suppressClick = true;
       this.dragMoved = true;

@@ -64,6 +64,7 @@ interface OverlaysProps {
   onStart: (difficulty: ArcadeDifficulty) => void;
   onArena: () => void;
   onSkirmish: () => void;
+  onCompany: () => void;
   onCampaign: () => void;
   onRestart: () => void;
   onReturnToMap: () => void;
@@ -80,6 +81,7 @@ export function Overlays({
   onStart,
   onArena,
   onSkirmish,
+  onCompany,
   onCampaign,
   onRestart,
   onReturnToMap,
@@ -236,6 +238,9 @@ export function Overlays({
                   }}
                 >
                   Arcade mode
+                </button>
+                <button type="button" className="ghost" onClick={onCompany}>
+                  Company
                 </button>
                 <button type="button" className="ghost" onClick={onArena}>
                   Arena
@@ -396,7 +401,7 @@ export function Overlays({
         </div>
       )}
 
-      {ui.phase === "running" && ui.toasts.length > 0 && (
+      {ui.phase === "running" && !ui.observer && ui.toasts.length > 0 && (
         <div className="toasts">
           {ui.toasts.slice(-2).map((t, i) => (
             <div key={`${t}-${i}`} className="toast">

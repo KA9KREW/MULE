@@ -164,6 +164,8 @@ export function adaptDoctrinePlan(
     keepHpRatio: number;
     enemyKeepHpRatio: number;
     currentLayer: DefendLayerId | null;
+    /** Easy CPU opponent: do not escalate past the tighter tune. */
+    frugal?: boolean;
   },
   profile?: OpponentTendency | null,
 ): AdaptivePlan {
@@ -189,7 +191,7 @@ export function adaptDoctrinePlan(
   const lateDefense = own.ecoFull && (own.churches >= 1 || own.time >= 200 || intel.totalArmy >= 10);
   let wantBallistas = lateDefense ? Math.max(tune.ballistaGoal, 2) : tune.ballistaGoal;
   let wantCatapults = lateDefense ? 1 : 0;
-  const wantBarracks =
+  let wantBarracks =
     own.ecoFull && (intel.totalArmy >= 16 || intel.barracks >= 2 || intel.churches >= 2 || own.time >= 210)
       ? Math.max(tune.barracksGoal, 2)
       : tune.barracksGoal;
@@ -471,6 +473,15 @@ export function adaptDoctrinePlan(
       own.armyUsed >= tune.midStageAt &&
       intel.approachingHome < 6;
     desiredLayer = canHoldMid ? "mid" : "home";
+  }
+
+  if (own.frugal) {
+    wantBarracks = Math.min(wantBarracks, Math.max(1, tune.barracksGoal));
+    wantTrebs = Math.min(wantTrebs, Math.max(0, tune.trebGoal));
+    wantRams = Math.min(wantRams, Math.max(0, tune.ramGoal));
+    wantSpies = Math.min(wantSpies, Math.max(0, tune.spyGoal));
+    wantBallistas = Math.min(wantBallistas, Math.max(1, tune.ballistaGoal));
+    wantCatapults = 0;
   }
 
   // Normalize percentages cleanly so levy gets the remainder.
